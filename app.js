@@ -116,26 +116,48 @@ const MODEL_DEFS = [
   { id: 'sphere', name: '球体',     baseY: 0.85, ring: 1.00, kind: 'seg',    segLabel: '球面段数', flat: false, color: '#7fb8e6', build: (s) => new THREE.SphereGeometry(0.85, s.seg, Math.max(8, Math.round(s.seg / 2))) },
   { id: 'cyl',    name: '圆柱',     baseY: 0.75, ring: 1.00, kind: 'seg',    segLabel: '径向段数', flat: false, color: '#d8b06a', build: (s) => new THREE.CylinderGeometry(0.75 * s.topRatio, 0.75, 1.5, s.seg, 1, false) },
   { id: 'cone',   name: '圆锥',     baseY: 0.80, ring: 1.00, kind: 'seg',    segLabel: '径向段数', flat: false, color: '#e6a06f', build: (s) => new THREE.ConeGeometry(0.9, 1.6, s.seg, 1, false) },
-  { id: 'tetra',  name: '四面体',   baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#7fd8a4', build: (s) => new THREE.TetrahedronGeometry(0.95, s.detail) },
-  { id: 'octa',   name: '八面体',   baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#e07f9e', build: (s) => new THREE.OctahedronGeometry(0.95, s.detail) },
-  { id: 'icosa',  name: '二十面体', baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#b48fe6', build: (s) => new THREE.IcosahedronGeometry(0.95, s.detail) },
-  { id: 'dodeca', name: '十二面体', baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#e6a07f', build: (s) => new THREE.DodecahedronGeometry(0.95, s.detail) },
+  { id: 'tetra',  name: '四面体',   baseY: 0.95, ring: 1.00, kind: 'detail', faceSnapDefault: true, flat: true,  color: '#7fd8a4', build: (s) => new THREE.TetrahedronGeometry(0.95, s.detail) },
+  { id: 'octa',   name: '八面体',   baseY: 0.95, ring: 1.00, kind: 'detail', faceSnapDefault: true, flat: true,  color: '#e07f9e', build: (s) => new THREE.OctahedronGeometry(0.95, s.detail) },
+  { id: 'icosa',  name: '二十面体', baseY: 0.95, ring: 1.00, kind: 'detail', faceSnapDefault: true, flat: true,  color: '#b48fe6', build: (s) => new THREE.IcosahedronGeometry(0.95, s.detail) },
+  { id: 'dodeca', name: '十二面体', baseY: 0.95, ring: 1.00, kind: 'detail', faceSnapDefault: true, flat: true,  color: '#e6a07f', build: (s) => new THREE.DodecahedronGeometry(0.95, s.detail) },
   { id: 'knot',   name: '圆环结',   baseY: 0.62, ring: 1.05, kind: 'seg',    segLabel: '管状段数', flat: false, color: '#8fe6d2', build: (s) => new THREE.TorusKnotGeometry(0.52, 0.17, s.seg, 8) },
 ];
 
-const defaultModelState = (def) => ({
-  color: def.color,
-  metalness: 0.25,
-  roughness: 0.38,
-  sx: 1, sy: 1, sz: 1,
-  rx: 0, ry: 0, rz: 0,
-  seg: 32,
-  detail: 0,
-  topRatio: 1,
-  wire: false,
-  edges: false,
-  spin: 0,
-});
+const wrapDeg = (d) => ((Math.round(d) % 360) + 360) % 360;
+const defaultModelState = (def) => {
+  const st = {
+    color: def.color,
+    metalness: 0.25,
+    roughness: 0.38,
+    sx: 1, sy: 1, sz: 1,
+    rx: 0, ry: 0, rz: 0,
+    seg: 32,
+    detail: 0,
+    topRatio: 1,
+    wire: false,
+    edges: false,
+    spin: 0,
+  };
+  if (def.faceSnapDefault) {
+    /* 默认让一个平面朝下贴地：取首个面的法线旋转到竖直向下，多面体不再顶点/棱着地 */
+    const g = def.build(st);
+    const pos = g.attributes.position;
+    const a = new THREE.Vector3().fromBufferAttribute(pos, 0);
+    const b = new THREE.Vector3().fromBufferAttribute(pos, 1);
+    const c = new THREE.Vector3().fromBufferAttribute(pos, 2);
+    const n = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
+    if (n.lengthSq() > 1e-8) {
+      n.normalize();
+      const q = new THREE.Quaternion().setFromUnitVectors(n, new THREE.Vector3(0, -1, 0));
+      const e = new THREE.Euler().setFromQuaternion(q, 'XYZ');
+      st.rx = wrapDeg((e.x * 180) / Math.PI);
+      st.ry = wrapDeg((e.y * 180) / Math.PI);
+      st.rz = wrapDeg((e.z * 180) / Math.PI);
+    }
+    g.dispose();
+  }
+  return st;
+};
 const modelState = {};
 MODEL_DEFS.forEach((d) => (modelState[d.id] = defaultModelState(d)));
 
@@ -291,7 +313,7 @@ function makeTextSprite(text) {
   ctx.fillText(text, w / 2, h / 2 + 2);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
   const sp = new THREE.Sprite(mat);
   const unit = 0.3; // 文字高度（场景单位）
   sp.scale.set((w / h) * unit, unit, 1);
@@ -320,7 +342,8 @@ function rebuildDims(entry) {
   const hz = ((bb.max.z - bb.min.z) / 2) * st.sz;
   const o = 0.22; // 标注线外扩距离
   const cm = (v) => (v * 10).toFixed(1) + 'cm'; // 1 场景单位 = 10cm
-  const lineMat = new THREE.LineBasicMaterial({ color: 0x5bc3ff, transparent: true, opacity: 0.9, depthTest: false });
+  /* 深度测试开启：标注在模型轮廓外侧，被模型遮挡时自动隐藏，不遮挡模型 */
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x5bc3ff, transparent: true, opacity: 0.9, depthTest: true });
 
   dg.position.copy(entry.mesh.position); // 与模型同中心高度
   dg.rotation.copy(entry.mesh.rotation); // 与模型同朝向
@@ -337,27 +360,28 @@ function rebuildDims(entry) {
     sp.position.set(x, y, z);
     dg.add(sp);
   };
-  /* 宽度（X 向）：前下方 */
-  const wy = -hy - o;
+  /* 三向尺寸线都布置在模型中高平面（y=0）的三个侧面：前/左/右，
+     绝不落到地面以下、互不重叠、不遮挡模型 */
+  /* 宽度（X 向）：正前方 */
   const wz = hz + o;
-  addLine([-hx, wy, wz], [hx, wy, wz]);
-  addLine([-hx, wy - 0.09, wz], [-hx, wy + 0.09, wz]);
-  addLine([hx, wy - 0.09, wz], [hx, wy + 0.09, wz]);
-  addLabel(cm(hx * 2), 0, wy - 0.24, wz);
-  /* 深度（Z 向）：更下方 */
-  const dz = -hy - o - 0.24;
-  addLine([0, dz, -hz], [0, dz, hz]);
-  addLine([0, dz - 0.09, -hz], [0, dz + 0.09, -hz]);
-  addLine([0, dz - 0.09, hz], [0, dz + 0.09, hz]);
-  addLabel(cm(hz * 2), 0, dz - 0.24, 0);
-  /* 高度（Y 向）：右侧 */
-  const hx2 = hx + o;
-  addLine([hx2, -hy, 0], [hx2, hy, 0]);
-  addLine([hx2 - 0.09, -hy, 0], [hx2 + 0.09, -hy, 0]);
-  addLine([hx2 - 0.09, hy, 0], [hx2 + 0.09, hy, 0]);
-  addLabel(cm(hy * 2), hx2 + 0.18, 0, 0);
+  addLine([-hx, 0, wz], [hx, 0, wz]);
+  addLine([-hx, -0.09, wz], [-hx, 0.09, wz]);
+  addLine([hx, -0.09, wz], [hx, 0.09, wz]);
+  addLabel(cm(hx * 2), 0, 0.26, wz);
+  /* 深度（Z 向）：左侧 */
+  const lx = -hx - o;
+  addLine([lx, 0, -hz], [lx, 0, hz]);
+  addLine([lx, -0.09, -hz], [lx, 0.09, -hz]);
+  addLine([lx, -0.09, hz], [lx, 0.09, hz]);
+  addLabel(cm(hz * 2), lx, 0.26, 0);
+  /* 高度（Y 向）：右侧（底部端点与地面齐平，不下探） */
+  const rx2 = hx + o;
+  addLine([rx2, -hy, 0], [rx2, hy, 0]);
+  addLine([rx2 - 0.09, -hy, 0], [rx2 + 0.09, -hy, 0]);
+  addLine([rx2 - 0.09, hy, 0], [rx2 + 0.09, hy, 0]);
+  addLabel(cm(hy * 2), rx2 + 0.18, 0, 0);
 
-  /* 边长标注：每种唯一长度标注一次（最多 4 种） */
+  /* 边长标注：每种唯一长度标注一次（最多 4 种），底面边缘的标签向上偏移不落地 */
   const eg = new THREE.EdgesGeometry(g);
   const ep = eg.attributes.position;
   const sc = new THREE.Vector3(st.sx, st.sy, st.sz);
@@ -376,6 +400,8 @@ function rebuildDims(entry) {
   seen.forEach((item) => {
     const mid = item.a.clone().add(item.b).multiplyScalar(0.5);
     const dir = mid.lengthSq() > 1e-6 ? mid.clone().normalize() : new THREE.Vector3(1, 0, 0);
+    if (dir.y < -0.25) dir.y = 0.45; // 底面附近的标签朝上偏移，不落到地面以下
+    dir.normalize();
     const p = mid.clone().addScaledVector(dir, 0.2);
     addLabel(cm(item.len), p.x, p.y, p.z);
   });
@@ -821,7 +847,8 @@ function buildModelParams() {
   btnResetOrient.className = 'mode-btn';
   btnResetOrient.textContent = '重置朝向';
   btnResetOrient.addEventListener('click', () => {
-    st.rx = 0; st.ry = 0; st.rz = 0;
+    const d = defaultModelState(def);
+    st.rx = d.rx; st.ry = d.ry; st.rz = d.rz;
     applyModel(currentEntry());
     buildModelParams();
     scheduleSave();
@@ -1190,11 +1217,63 @@ function wireGlobalUI() {
   });
   $('#btn-shot').addEventListener('click', () => {
     renderer.render(scene, camera);
-    canvas.toBlob((blob) => {
+    const v = currentView();
+    const bgNames = { studio: '暗色影棚', day: '明亮天空', dusk: '黄昏渐变', night: '深夜' };
+    const bgName = bgNames[bg] ?? bg;
+    const typeNames = { directional: '平行光', point: '点光源', spot: '聚光灯' };
+    const lightsTxt = lightDefs
+      .slice(0, lightCount)
+      .filter((d) => d.enabled)
+      .map((d) => typeNames[d.type] + ' ' + fmt(d.intensity) + '/' + (d.custom ? d.customColor : Math.round(d.kelvin) + 'K'))
+      .join('，');
+    const modelTxt = [...shownIds]
+      .map((id) => (MODEL_DEFS.find((d) => d.id === id) ?? {}).name)
+      .filter(Boolean)
+      .join('/');
+    const lines = [
+      '光影实验室 · Light Studio',
+      '视角：方位角 ' + Math.round(v.az) + '° · 仰角 ' + Math.round(v.el) + '° · 距离 ' + v.d.toFixed(1) + 'm',
+      '光照(' + lightCount + ')：' + (lightsTxt || '无'),
+      '环境光 ' + fmt(ambientI) + ' · 曝光 ' + fmt(exposure) + ' · 背景 ' + bgName,
+      '模型：' + (modelTxt || '无'),
+      '保存时间：' + new Date().toLocaleString(),
+    ];
+    /* 把参数信息叠加绘制到截图左上角 */
+    const c2 = document.createElement('canvas');
+    c2.width = canvas.width;
+    c2.height = canvas.height;
+    const ctx = c2.getContext('2d');
+    ctx.drawImage(canvas, 0, 0);
+    const fs = Math.max(13, Math.round(c2.height / 60));
+    ctx.font = fs + 'px "Segoe UI", "Microsoft YaHei", sans-serif';
+    const lineH = fs * 1.6;
+    const pad = fs;
+    const wMax = Math.max(...lines.map((t) => ctx.measureText(t).width));
+    const bw = wMax + pad * 2;
+    const bh = lines.length * lineH + pad * 1.3;
+    ctx.fillStyle = 'rgba(10, 14, 22, 0.72)';
+    roundRectPath(ctx, pad, pad, bw, bh, 10);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(91, 195, 255, 0.85)';
+    ctx.lineWidth = 1.5;
+    roundRectPath(ctx, pad, pad, bw, bh, 10);
+    ctx.stroke();
+    ctx.fillStyle = '#dff0ff';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    lines.forEach((t, i) => ctx.fillText(t, pad * 2, pad * 1.15 + i * lineH));
+    /* 文件名携带视角与光照参数 */
+    const now = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    const ts = now.getFullYear() + p2(now.getMonth() + 1) + p2(now.getDate()) + '-' + p2(now.getHours()) + p2(now.getMinutes()) + p2(now.getSeconds());
+    const safe = (s) => String(s).replace(/[\\/:*?"<>|]/g, '_');
+    const fname =
+      safe('light-studio_AZ' + Math.round(v.az) + '_EL' + Math.round(v.el) + '_D' + v.d.toFixed(1) + '_L' + lightCount + '_' + bgName) + '_' + ts + '.png';
+    c2.toBlob((blob) => {
       if (!blob) return;
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'light-studio-' + Date.now() + '.png';
+      a.download = fname;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 3000);
     }, 'image/png');
@@ -1232,8 +1311,8 @@ function wireGlobalUI() {
 }
 
 /* ---------------------------- 持久化 ---------------------------- */
-const SAVE_KEY = 'light-studio-v4';
-const DEFAULT_KEY = 'light-studio-default-v4';
+const SAVE_KEY = 'light-studio-v5';
+const DEFAULT_KEY = 'light-studio-default-v5';
 
 function serializeState() {
   return {

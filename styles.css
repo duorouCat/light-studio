@@ -324,7 +324,7 @@ input[type="color"] {
   left: 50%;
   bottom: 12px;
   transform: translateX(-50%);
-  width: min(600px, calc(100% - 24px));
+  width: min(760px, calc(100% - 24px));
   background: rgba(13, 17, 26, 0.88);
   border: 1px solid var(--panel-border);
   border-radius: 12px;
@@ -336,13 +336,13 @@ input[type="color"] {
   gap: 6px;
 }
 .dock-title { font-size: 10px; letter-spacing: 2px; color: var(--muted); }
-#view-rows { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+#view-rows { display: flex; flex-direction: column; gap: 6px; }
 .view-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .cell-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .cell-controls { display: flex; align-items: center; gap: 6px; }
 .cell-controls input[type="range"] { flex: 1; min-width: 0; }
 .cell-controls .ctrl-num { width: 52px; flex: none; }
-.dock-bottom { display: grid; grid-template-columns: 1fr 1.2fr; gap: 12px; }
+.dock-bottom { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: 12px; }
 .dock-col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dock-col-title { font-size: 10px; letter-spacing: 1px; color: var(--muted); }
 #view-presets { display: flex; flex-direction: column; gap: 4px; }
