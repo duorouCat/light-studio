@@ -38,6 +38,10 @@
 
     <aside id="panel-model" class="panel">
       <div class="panel-title"><span class="dot m"></span>模型 · MODEL</div>
+      <div class="mode-row">
+        <button id="btn-add-mode" class="mode-btn on">添加模式</button>
+        <button id="btn-replace-mode" class="mode-btn">替换模式</button>
+      </div>
       <div id="model-buttons"></div>
       <div id="model-count" class="note"></div>
       <div id="model-params"></div>
@@ -55,8 +59,8 @@
         <div class="section-title">全局环境</div>
         <div class="ctrl-row">
           <span class="ctrl-label">光源数量</span>
-          <input type="range" id="light-count" min="1" max="6" step="1" value="2">
-          <input type="number" class="ctrl-num" id="light-count-num" min="1" max="6" step="1" value="2">
+          <input type="range" id="light-count" min="1" max="6" step="1" value="1">
+          <input type="number" class="ctrl-num" id="light-count-num" min="1" max="6" step="1" value="1">
         </div>
         <div class="ctrl-row">
           <span class="ctrl-label">环境光</span>

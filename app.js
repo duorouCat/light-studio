@@ -140,6 +140,7 @@ MODEL_DEFS.forEach((d) => (modelState[d.id] = defaultModelState(d)));
 let selectedId = 'box';
 let shownIds = new Set(['box']);
 let faceSnapMode = false;
+let addMode = true; // 模型选择模式：true=添加模式，false=替换模式
 const currentEntry = () => modelEntries.find((e) => e.def.id === selectedId);
 
 /* 选中指示：地面金色圆环（不随模型旋转，稳定美观） */
@@ -255,14 +256,14 @@ const MAX_LIGHTS = 6;
 const TYPE_MAX = { directional: 10, point: 10, spot: 10 };
 
 const defaultLightDefs = () => [
-  { type: 'directional', kelvin: 6500, intensity: 2.5, azimuth: -35,  elevation: 40, distance: 7, custom: false, customColor: '#ffffff', shadow: true,  enabled: true,  angle: 30, penumbra: 0.5 },
+  { type: 'directional', kelvin: 6500, intensity: 2.5, azimuth: 0,    elevation: 45, distance: 7, custom: false, customColor: '#ffffff', shadow: true,  enabled: true,  angle: 30, penumbra: 0.5 },
   { type: 'point',       kelvin: 4000, intensity: 4,   azimuth: 95,   elevation: 22, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true,  angle: 30, penumbra: 0.5 },
   { type: 'point',       kelvin: 8000, intensity: 5,   azimuth: 200,  elevation: 45, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 30, penumbra: 0.5 },
   { type: 'spot',        kelvin: 5500, intensity: 6,   azimuth: -150, elevation: 55, distance: 9, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 28, penumbra: 0.5 },
   { type: 'directional', kelvin: 3000, intensity: 1.5, azimuth: 150,  elevation: 15, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 30, penumbra: 0.5 },
   { type: 'point',       kelvin: 2000, intensity: 6,   azimuth: 0,    elevation: 8,  distance: 6, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 30, penumbra: 0.5 },
 ];
-let lightCount = 2;
+let lightCount = 1;
 const lightDefs = defaultLightDefs();
 
 const ambient = new THREE.AmbientLight(0xffffff, 0.5);
@@ -449,10 +450,10 @@ function updateGlobalLights() {
 /* ------------------------------ 预设 ------------------------------ */
 const PRESETS = [
   {
-    name: '影棚标准', count: 2, bg: 'studio', exposure: 1.0,
+    name: '影棚标准', count: 1, bg: 'studio', exposure: 1.0,
     ambient: { i: 0.5, k: 6500 }, hemi: { on: false, i: 0.4 },
     defs: [
-      { type: 'directional', kelvin: 6500, intensity: 2.5, azimuth: -35, elevation: 40, distance: 7, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'directional', kelvin: 6500, intensity: 2.5, azimuth: 0, elevation: 45, distance: 7, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
       { type: 'point', kelvin: 4000, intensity: 4, azimuth: 95, elevation: 22, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
     ],
   },
@@ -543,7 +544,10 @@ function refreshModelButtons() {
     b.classList.toggle('active', b.dataset.id === selectedId);
   });
   const countEl = $('#model-count');
-  if (countEl) countEl.textContent = `正在展示 ${shownIds.size} / ${MODEL_DEFS.length} 个模型 · 点亮按钮可增减`;
+  if (countEl) {
+    const modeText = addMode ? '添加模式（点击按钮增减模型）' : '替换模式（点击按钮只展示该模型）';
+    countEl.textContent = `正在展示 ${shownIds.size} / ${MODEL_DEFS.length} 个模型 · ${modeText}`;
+  }
 }
 
 function applyVisibility() {
@@ -551,6 +555,16 @@ function applyVisibility() {
 }
 
 function toggleModel(id) {
+  if (!addMode) {
+    /* 替换模式：点击后只展示该模型 */
+    if (shownIds.has(id) && shownIds.size === 1) {
+      selectModel(id); // 已是唯一展示模型，仅切换编辑目标
+      return;
+    }
+    shownIds = new Set([id]);
+    selectModel(id);
+    return;
+  }
   if (shownIds.has(id)) {
     if (shownIds.size === 1) return; // 至少展示一个模型
     shownIds.delete(id);
@@ -863,6 +877,8 @@ function syncGlobalUI() {
   setChip($('#btn-autorotate'), autorotate);
   setChip($('#btn-markers'), showMarkers);
   setChip($('#btn-grid'), showGrid);
+  setChip($('#btn-add-mode'), addMode);
+  setChip($('#btn-replace-mode'), !addMode);
 }
 
 /* 提示气泡 */
@@ -974,6 +990,21 @@ function wireGlobalUI() {
     scheduleSave();
   });
   $('#preset-select').addEventListener('change', (e) => applyPreset(Number(e.target.value)));
+  const syncModeButtons = () => {
+    setChip($('#btn-add-mode'), addMode);
+    setChip($('#btn-replace-mode'), !addMode);
+    refreshModelButtons();
+  };
+  $('#btn-add-mode').addEventListener('click', () => {
+    addMode = true;
+    syncModeButtons();
+    scheduleSave();
+  });
+  $('#btn-replace-mode').addEventListener('click', () => {
+    addMode = false;
+    syncModeButtons();
+    scheduleSave();
+  });
   $('#btn-autorotate').addEventListener('click', (e) => {
     autorotate = !autorotate;
     controls.autoRotate = autorotate;
@@ -1017,6 +1048,7 @@ function wireGlobalUI() {
     });
     shownIds = new Set(['box']);
     faceSnapMode = false;
+    addMode = true;
     applyPreset(0);
     selectModel('box');
     controls.reset();
@@ -1024,7 +1056,7 @@ function wireGlobalUI() {
 }
 
 /* ---------------------------- 持久化 ---------------------------- */
-const SAVE_KEY = 'light-studio-v3';
+const SAVE_KEY = 'light-studio-v4';
 
 function serializeState() {
   return {
@@ -1039,6 +1071,7 @@ function serializeState() {
     selectedId,
     shownIds: [...shownIds],
     faceSnapMode,
+    addMode,
     modelState,
     autorotate,
     showMarkers,
@@ -1058,7 +1091,7 @@ function scheduleSave() {
 
 function loadState(s) {
   if (!s || typeof s !== 'object') return false;
-  lightCount = clamp(Math.round(s.lightCount ?? 2), 1, MAX_LIGHTS);
+  lightCount = clamp(Math.round(s.lightCount ?? 1), 1, MAX_LIGHTS);
   (s.defs ?? []).forEach((d, i) => {
     if (i < MAX_LIGHTS) {
       lightDefs[i] = { ...defaultLightDefs()[i], ...d };
@@ -1097,6 +1130,7 @@ function loadState(s) {
     if (valid.length) shownIds = new Set(valid);
   }
   faceSnapMode = !!s.faceSnapMode;
+  addMode = s.addMode !== false;
   controls.autoRotate = autorotate;
   grid.visible = showGrid;
   syncGlobalUI();
