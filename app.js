@@ -210,14 +210,10 @@ const modelEntries = MODEL_DEFS.map((def) => {
   edges.scale.setScalar(1.002);
   edges.visible = false;
   mesh.add(edges);
-  /* 尺寸标注层：与模型同朝向、随模型移动旋转 */
-  const dimGroup = new THREE.Group();
-  dimGroup.visible = false;
-  group.add(dimGroup);
   group.add(mesh);
   group.visible = false;
   scene.add(group);
-  return { def, group, mesh, edges, dimGroup, state: st };
+  return { def, group, mesh, edges, state: st };
 });
 
 function applyModel(entry) {
@@ -237,7 +233,6 @@ function applyModel(entry) {
   computeFootprint(entry);
   layoutModels();
   if (entry.def.id === selectedId) updateSelectionRing();
-  rebuildDims(entry);
 }
 
 /* 依据缩放+朝向计算占地（贴地高度 / XZ 半径），用于自动布局与地面圆环 */
@@ -276,8 +271,6 @@ function computeFootprint(entry) {
   entry.group.position.y = -minY; // 模型最低点时刻贴地：吸附面平放时与地面正好重合
 }
 
-/* ============================ 尺寸标注（技术图纸风格） ============================ */
-let showDims = false; // 是否显示三维尺寸与边长标注
 
 function roundRectPath(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -289,149 +282,6 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-/* 生成文字标签（Canvas 贴图 Sprite，始终面向相机） */
-function makeTextSprite(text) {
-  const pad = 16;
-  const fontPx = 44;
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  ctx.font = 'bold ' + fontPx + 'px "Segoe UI", "Microsoft YaHei", sans-serif';
-  const w = Math.ceil(ctx.measureText(text).width) + pad * 2;
-  const h = fontPx + pad * 2;
-  canvas.width = w;
-  canvas.height = h;
-  roundRectPath(ctx, 0, 0, w, h, 12);
-  ctx.fillStyle = 'rgba(10, 14, 22, 0.85)';
-  ctx.fill();
-  ctx.strokeStyle = '#5bc3ff';
-  ctx.lineWidth = 2;
-  roundRectPath(ctx, 0, 0, w, h, 12);
-  ctx.stroke();
-  ctx.fillStyle = '#dff0ff';
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'center';
-  ctx.fillText(text, w / 2, h / 2 + 2);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
-  const sp = new THREE.Sprite(mat);
-  sp.userData.ratio = w / h;
-  sp.userData.screenFrac = 0.045; // 标签高度占屏幕高度的比例：字体放大且不随视角缩放
-  sp.scale.set(1, 1, 1); // 实际大小由动画循环按相机距离动态更新（屏幕尺寸恒定）
-  return sp;
-}
-
-/* 重建选中模型的技术图纸式尺寸标注：整体长/宽/高 + 各边长 */
-function rebuildDims(entry) {
-  const dg = entry.dimGroup;
-  while (dg.children.length) {
-    const c = dg.children.pop();
-    if (c.geometry) c.geometry.dispose();
-    if (c.material) {
-      if (c.material.map) c.material.map.dispose();
-      c.material.dispose();
-    }
-  }
-  dg.visible = showDims && entry.def.id === selectedId;
-  if (!dg.visible) return;
-  const st = entry.state;
-  const g = entry.mesh.geometry;
-  if (!g.boundingBox) g.computeBoundingBox();
-  const bb = g.boundingBox;
-  const hx = ((bb.max.x - bb.min.x) / 2) * st.sx;
-  const hy = ((bb.max.y - bb.min.y) / 2) * st.sy;
-  const hz = ((bb.max.z - bb.min.z) / 2) * st.sz;
-  const o = 0.22; // 标注线外扩距离
-  const cm = (v) => (v * 10).toFixed(1) + 'cm'; // 1 场景单位 = 10cm
-  /* 深度测试开启：标注在模型轮廓外侧，被模型遮挡时自动隐藏，不遮挡模型 */
-  const lineMat = new THREE.LineBasicMaterial({ color: 0x5bc3ff, transparent: true, opacity: 0.9, depthTest: true });
-
-  dg.position.copy(entry.mesh.position); // 与模型同中心高度
-  dg.rotation.copy(entry.mesh.rotation); // 与模型同朝向
-
-  const addLine = (a, b) => {
-    const seg = new THREE.LineSegments(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2])]),
-      lineMat
-    );
-    dg.add(seg);
-  };
-  const addLabel = (text, x, y, z) => {
-    const sp = makeTextSprite(text);
-    sp.position.set(x, y, z);
-    dg.add(sp);
-  };
-  /* 虚线延长线材质（技术图纸风格） */
-  const dashMat = new THREE.LineDashedMaterial({
-    color: 0x5bc3ff,
-    transparent: true,
-    opacity: 0.65,
-    depthTest: true,
-    dashSize: 0.08,
-    gapSize: 0.06,
-  });
-  const addDashed = (a, b) => {
-    const line = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2])]),
-      dashMat
-    );
-    line.computeLineDistances();
-    dg.add(line);
-  };
-  /* 三向尺寸线都布置在模型中高平面（y=0）的三个侧面：前/左/右，
-     绝不落到地面以下、互不重叠、不遮挡模型 */
-  /* 宽度（X 向）：正前方 */
-  const wz = hz + o;
-  addLine([-hx, 0, wz], [hx, 0, wz]);
-  addLine([-hx, -0.09, wz], [-hx, 0.09, wz]);
-  addLine([hx, -0.09, wz], [hx, 0.09, wz]);
-  addLabel(cm(hx * 2), 0, 0.26, wz);
-  /* 深度（Z 向）：左侧 */
-  const lx = -hx - o;
-  addLine([lx, 0, -hz], [lx, 0, hz]);
-  addLine([lx, -0.09, -hz], [lx, 0.09, -hz]);
-  addLine([lx, -0.09, hz], [lx, 0.09, hz]);
-  addLabel(cm(hz * 2), lx, 0.26, 0);
-  /* 高度（Y 向）：右侧（底部端点与地面齐平，不下探） */
-  const rx2 = hx + o;
-  addLine([rx2, -hy, 0], [rx2, hy, 0]);
-  addLine([rx2 - 0.09, -hy, 0], [rx2 + 0.09, -hy, 0]);
-  addLine([rx2 - 0.09, hy, 0], [rx2 + 0.09, hy, 0]);
-  addLabel(cm(hy * 2), rx2 + 0.18, 0, 0);
-
-  /* 虚线延长线：从模型轮廓角点向外延伸到各尺寸线 */
-  addDashed([-hx, -hy, hz], [-hx, 0, wz]); // 宽度：前下角 → 前方尺寸线
-  addDashed([hx, -hy, hz], [hx, 0, wz]);
-  addDashed([-hx, -hy, -hz], [lx, 0, -hz]); // 深度：左前/左后角 → 左侧尺寸线
-  addDashed([-hx, -hy, hz], [lx, 0, hz]);
-  addDashed([hx, -hy, 0], [rx2, -hy, 0]); // 高度：右底/右顶角 → 右侧尺寸线
-  addDashed([hx, hy, 0], [rx2, hy, 0]);
-
-  /* 边长标注：每种唯一长度标注一次（最多 4 种），底面边缘的标签向上偏移不落地 */
-  const eg = new THREE.EdgesGeometry(g);
-  const ep = eg.attributes.position;
-  const sc = new THREE.Vector3(st.sx, st.sy, st.sz);
-  const v1 = new THREE.Vector3();
-  const v2 = new THREE.Vector3();
-  const seen = new Map();
-  for (let i = 0; i < ep.count; i += 2) {
-    v1.fromBufferAttribute(ep, i).multiply(sc);
-    v2.fromBufferAttribute(ep, i + 1).multiply(sc);
-    const len = v1.distanceTo(v2);
-    const key = len.toFixed(2);
-    if (len > 1e-4 && !seen.has(key)) seen.set(key, { a: v1.clone(), b: v2.clone(), len });
-    if (seen.size >= 4) break;
-  }
-  eg.dispose();
-  seen.forEach((item) => {
-    const mid = item.a.clone().add(item.b).multiplyScalar(0.5);
-    const dir = mid.lengthSq() > 1e-6 ? mid.clone().normalize() : new THREE.Vector3(1, 0, 0);
-    if (dir.y < -0.25) dir.y = 0.45; // 底面附近的标签朝上偏移，不落到地面以下
-    dir.normalize();
-    const p = mid.clone().addScaledVector(dir, 0.2);
-    addLabel(cm(item.len), p.x, p.y, p.z);
-  });
-}
 function rebuildModel(entry) {
   entry.mesh.geometry.dispose();
   entry.mesh.geometry = entry.def.build(entry.state);
@@ -772,7 +622,6 @@ function selectModel(id) {
   refreshModelButtons();
   updateSelectionRing();
   buildModelParams();
-  modelEntries.forEach(rebuildDims);
   scheduleSave();
 }
 
@@ -896,11 +745,6 @@ function buildModelParams() {
   wrap.append(n2);
   check('显示边线', st.edges, (v) => { st.edges = v; applyModel(currentEntry()); scheduleSave(); });
   check('线框显示', st.wire, (v) => { st.wire = v; applyModel(currentEntry()); scheduleSave(); });
-  check('尺寸标注', showDims, (v) => {
-    showDims = v;
-    modelEntries.forEach(rebuildDims);
-    scheduleSave();
-  });
   slider('自转速度', 0, 1.2, 0.01, st.spin, (v) => { st.spin = v; scheduleSave(); });
   const resetRow = document.createElement('div');
   resetRow.className = 'mode-row';
@@ -1328,7 +1172,6 @@ function wireGlobalUI() {
       shownIds = new Set(['box']);
       faceSnapMode = false;
       addMode = true;
-      showDims = false;
       applyPreset(0);
       selectModel('box');
     }
@@ -1354,7 +1197,6 @@ function serializeState() {
     shownIds: [...shownIds],
     faceSnapMode,
     addMode,
-    showDims,
     modelState,
     autorotate,
     showMarkers,
@@ -1414,7 +1256,6 @@ function loadState(s) {
   }
   faceSnapMode = !!s.faceSnapMode;
   addMode = s.addMode !== false;
-  showDims = !!s.showDims;
   controls.autoRotate = autorotate;
   grid.visible = showGrid;
   syncGlobalUI();
@@ -1704,21 +1545,6 @@ function buildViewUI() {
 const clock = new THREE.Clock();
 let fpsFrames = 0;
 let fpsTime = 0;
-const dimSpritePos = new THREE.Vector3();
-
-/* 尺寸标签保持屏幕尺寸恒定：按相机距离动态换算世界大小，不随视角缩放 */
-function updateDimSpriteScale() {
-  const entry = currentEntry();
-  if (!entry || !entry.dimGroup.visible) return;
-  for (const c of entry.dimGroup.children) {
-    if (!c.isSprite) continue;
-    c.getWorldPosition(dimSpritePos);
-    const dist = dimSpritePos.distanceTo(camera.position);
-    const frac = c.userData.screenFrac ?? 0.045;
-    const h = 2 * dist * Math.tan(deg2rad(camera.fov) / 2) * frac;
-    c.scale.set(h * (c.userData.ratio ?? 4), h, 1);
-  }
-}
 
 function animate() {
   requestAnimationFrame(animate);
@@ -1728,7 +1554,6 @@ function animate() {
     if (e.group.visible) e.group.rotation.y += e.state.spin * dt;
   }
   markers.forEach((m, i) => m.sphere.scale.setScalar(1 + Math.sin(t * 3 + i * 1.7) * 0.18));
-  updateDimSpriteScale();
   controls.update();
   renderer.render(scene, camera);
   fpsFrames += 1;
