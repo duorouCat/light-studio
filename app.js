@@ -315,8 +315,9 @@ function makeTextSprite(text) {
   tex.colorSpace = THREE.SRGBColorSpace;
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
   const sp = new THREE.Sprite(mat);
-  const unit = 0.3; // 文字高度（场景单位）
-  sp.scale.set((w / h) * unit, unit, 1);
+  sp.userData.ratio = w / h;
+  sp.userData.screenFrac = 0.045; // 标签高度占屏幕高度的比例：字体放大且不随视角缩放
+  sp.scale.set(1, 1, 1); // 实际大小由动画循环按相机距离动态更新（屏幕尺寸恒定）
   return sp;
 }
 
@@ -360,6 +361,23 @@ function rebuildDims(entry) {
     sp.position.set(x, y, z);
     dg.add(sp);
   };
+  /* 虚线延长线材质（技术图纸风格） */
+  const dashMat = new THREE.LineDashedMaterial({
+    color: 0x5bc3ff,
+    transparent: true,
+    opacity: 0.65,
+    depthTest: true,
+    dashSize: 0.08,
+    gapSize: 0.06,
+  });
+  const addDashed = (a, b) => {
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2])]),
+      dashMat
+    );
+    line.computeLineDistances();
+    dg.add(line);
+  };
   /* 三向尺寸线都布置在模型中高平面（y=0）的三个侧面：前/左/右，
      绝不落到地面以下、互不重叠、不遮挡模型 */
   /* 宽度（X 向）：正前方 */
@@ -380,6 +398,14 @@ function rebuildDims(entry) {
   addLine([rx2 - 0.09, -hy, 0], [rx2 + 0.09, -hy, 0]);
   addLine([rx2 - 0.09, hy, 0], [rx2 + 0.09, hy, 0]);
   addLabel(cm(hy * 2), rx2 + 0.18, 0, 0);
+
+  /* 虚线延长线：从模型轮廓角点向外延伸到各尺寸线 */
+  addDashed([-hx, -hy, hz], [-hx, 0, wz]); // 宽度：前下角 → 前方尺寸线
+  addDashed([hx, -hy, hz], [hx, 0, wz]);
+  addDashed([-hx, -hy, -hz], [lx, 0, -hz]); // 深度：左前/左后角 → 左侧尺寸线
+  addDashed([-hx, -hy, hz], [lx, 0, hz]);
+  addDashed([hx, -hy, 0], [rx2, -hy, 0]); // 高度：右底/右顶角 → 右侧尺寸线
+  addDashed([hx, hy, 0], [rx2, hy, 0]);
 
   /* 边长标注：每种唯一长度标注一次（最多 4 种），底面边缘的标签向上偏移不落地 */
   const eg = new THREE.EdgesGeometry(g);
@@ -1678,6 +1704,22 @@ function buildViewUI() {
 const clock = new THREE.Clock();
 let fpsFrames = 0;
 let fpsTime = 0;
+const dimSpritePos = new THREE.Vector3();
+
+/* 尺寸标签保持屏幕尺寸恒定：按相机距离动态换算世界大小，不随视角缩放 */
+function updateDimSpriteScale() {
+  const entry = currentEntry();
+  if (!entry || !entry.dimGroup.visible) return;
+  for (const c of entry.dimGroup.children) {
+    if (!c.isSprite) continue;
+    c.getWorldPosition(dimSpritePos);
+    const dist = dimSpritePos.distanceTo(camera.position);
+    const frac = c.userData.screenFrac ?? 0.045;
+    const h = 2 * dist * Math.tan(deg2rad(camera.fov) / 2) * frac;
+    c.scale.set(h * (c.userData.ratio ?? 4), h, 1);
+  }
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.1);
@@ -1686,6 +1728,7 @@ function animate() {
     if (e.group.visible) e.group.rotation.y += e.state.spin * dt;
   }
   markers.forEach((m, i) => m.sphere.scale.setScalar(1 + Math.sin(t * 3 + i * 1.7) * 0.18));
+  updateDimSpriteScale();
   controls.update();
   renderer.render(scene, camera);
   fpsFrames += 1;
