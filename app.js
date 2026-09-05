@@ -1371,10 +1371,10 @@ function applyView(az, el, d) {
   syncViewInputs();
 }
 
-/* 用当前相机位置刷新视角输入框（视角面板内有编辑焦点时不覆盖，避免拖动打架） */
+/* 用当前相机位置刷新视角输入框（仅当正在编辑输入框时不覆盖，点击按钮等操作正常同步） */
 function syncViewInputs() {
-  const dock = $('#view-dock');
-  if (dock && dock.contains(document.activeElement)) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
   const v = currentView();
   for (const row of viewRowRefs) {
     const val = String(Math.round(v[row.key] * 10) / 10);
