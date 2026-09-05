@@ -82,3 +82,8 @@ light-studio/
   三种光源类型亮度表现一致、兼容性最佳
 - 色温换算：Tanner Helland 近似算法（1000K 烛光 → 12000K 蓝天）
 - 无构建步骤、无外部 CDN，开箱即用
+
+## 🗂 版本管理
+
+- 本目录为 Git 仓库（默认分支 `main`），vendor/ 离线依赖一并提交，克隆后开箱即用
+- 常用命令：`git status` / `git add -A` / `git commit -m "说明"` / `git log --oneline`
