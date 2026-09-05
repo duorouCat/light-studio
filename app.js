@@ -64,10 +64,12 @@ resize();
 
 /* ---------------------------- 地面与网格 ---------------------------- */
 /* 地面使用受光材质：点/聚光灯的光斑（圆形/锥形）与阴影都能在地面显示 */
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(500, 500),
-  new THREE.MeshStandardMaterial({ color: 0x151b28, roughness: 0.95, metalness: 0 })
-);
+const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x151b28, roughness: 0.95, metalness: 0 });
+/* 深度偏移：模型面平贴地面（y=0 重合）时不产生闪烁，地面被轻微推后 */
+groundMaterial.polygonOffset = true;
+groundMaterial.polygonOffsetFactor = 1;
+groundMaterial.polygonOffsetUnits = 1;
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), groundMaterial);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
@@ -240,7 +242,7 @@ function computeFootprint(entry) {
     entry.group.position.y = 0.5;
     return;
   }
-  entry.group.position.y = -minY + 0.03; // 留 3cm 间隙，避免与地面重合闪烁
+  entry.group.position.y = -minY; // 模型最低点时刻贴地：吸附面平放时与地面正好重合
 }
 function rebuildModel(entry) {
   entry.mesh.geometry.dispose();
