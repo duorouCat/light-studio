@@ -992,6 +992,23 @@ function wireGlobalUI() {
     scheduleSave();
   });
   $('#preset-select').addEventListener('change', (e) => applyPreset(Number(e.target.value)));
+  $('#btn-save-default').addEventListener('click', () => {
+    try {
+      localStorage.setItem(DEFAULT_KEY, JSON.stringify(serializeState()));
+      showToast('已保存当前配置为默认配置，下次启动将自动加载');
+    } catch {
+      showToast('保存失败：浏览器存储不可用');
+    }
+  });
+  $('#btn-save-view').addEventListener('click', () => {
+    const list = loadCustomViews();
+    const name = nextViewName();
+    list.push({ name, ...currentView() });
+    saveCustomViews(list);
+    renderCustomViews();
+    showToast('已保存「' + name + '」，点名称应用、✎ 重命名、× 删除');
+  });
+  controls.addEventListener('change', syncViewInputs);
   const syncModeButtons = () => {
     setChip($('#btn-add-mode'), addMode);
     setChip($('#btn-replace-mode'), !addMode);
@@ -1041,24 +1058,35 @@ function wireGlobalUI() {
     else document.documentElement.requestFullscreen?.();
   });
   $('#btn-reset').addEventListener('click', () => {
-    if (!window.confirm('确定要重置全部设置吗？将恢复出厂预设。')) return;
-    try { localStorage.removeItem(SAVE_KEY); } catch {}
-    MODEL_DEFS.forEach((d) => (modelState[d.id] = defaultModelState(d)));
-    modelEntries.forEach((e) => {
-      e.state = modelState[e.def.id];
-      rebuildModel(e);
-    });
-    shownIds = new Set(['box']);
-    faceSnapMode = false;
-    addMode = true;
-    applyPreset(0);
-    selectModel('box');
+    if (!window.confirm('确定要重置吗？将恢复为已保存的默认配置（若未保存过默认配置，则恢复出厂预设）。')) return;
+    let done = false;
+    try {
+      const d = JSON.parse(localStorage.getItem(DEFAULT_KEY));
+      if (d && typeof d === 'object') {
+        loadState(d);
+        done = true;
+      }
+    } catch {}
+    if (!done) {
+      try { localStorage.removeItem(SAVE_KEY); } catch {}
+      MODEL_DEFS.forEach((d) => (modelState[d.id] = defaultModelState(d)));
+      modelEntries.forEach((e) => {
+        e.state = modelState[e.def.id];
+        rebuildModel(e);
+      });
+      shownIds = new Set(['box']);
+      faceSnapMode = false;
+      addMode = true;
+      applyPreset(0);
+      selectModel('box');
+    }
     controls.reset();
   });
 }
 
 /* ---------------------------- 持久化 ---------------------------- */
 const SAVE_KEY = 'light-studio-v4';
+const DEFAULT_KEY = 'light-studio-default-v4';
 
 function serializeState() {
   return {
@@ -1209,6 +1237,215 @@ canvas.addEventListener('pointermove', (e) => {
   canvas.style.cursor = pickAt(e.clientX, e.clientY) ? 'pointer' : 'grab';
 });
 
+/* ---------------------------- 视角控制 ---------------------------- */
+const VIEW_PRESETS = [
+  { name: '默认', az: 0, el: 15, d: 16, isDefault: true },
+  { name: '正面', az: 0, el: 15, d: 14 },
+  { name: '侧面', az: 90, el: 15, d: 14 },
+  { name: '45°角', az: 45, el: 22, d: 14 },
+  { name: '低角度', az: 35, el: 6, d: 12 },
+  { name: '俯视', az: 0, el: 85, d: 14 },
+];
+const VIEWS_KEY = 'light-studio-views-v1';
+const viewRowRefs = [];
+
+/* 当前相机视角 → 方位角 / 仰角 / 距离 */
+function currentView() {
+  const offset = camera.position.clone().sub(controls.target);
+  const d = offset.length();
+  if (!isFinite(d) || d <= 0.01) return { az: 0, el: 15, d: 16 };
+  const el = (Math.asin(clamp(offset.y / d, -1, 1)) * 180) / Math.PI;
+  const az = normDeg((Math.atan2(offset.x, offset.z) * 180) / Math.PI);
+  return { az, el, d };
+}
+
+/* 按方位角/仰角/距离摆放相机（绕目标点） */
+function applyView(az, el, d) {
+  if (!isFinite(az) || !isFinite(el) || !isFinite(d)) return;
+  const azR = deg2rad(az);
+  const elR = deg2rad(clamp(el, 0, 87));
+  const dist = clamp(d, controls.minDistance, controls.maxDistance);
+  const off = new THREE.Vector3(
+    dist * Math.cos(elR) * Math.sin(azR),
+    dist * Math.sin(elR),
+    dist * Math.cos(elR) * Math.cos(azR)
+  );
+  camera.position.copy(controls.target).add(off);
+  controls.update();
+  syncViewInputs();
+}
+
+/* 用当前相机位置刷新视角输入框（视角面板内有编辑焦点时不覆盖，避免拖动打架） */
+function syncViewInputs() {
+  const dock = $('#view-dock');
+  if (dock && dock.contains(document.activeElement)) return;
+  const v = currentView();
+  for (const row of viewRowRefs) {
+    const val = String(Math.round(v[row.key] * 10) / 10);
+    row.range.value = val;
+    row.num.value = val;
+  }
+}
+
+function loadCustomViews() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEWS_KEY));
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+function saveCustomViews(list) {
+  try {
+    localStorage.setItem(VIEWS_KEY, JSON.stringify(list));
+  } catch {}
+}
+
+/* 生成不重复的默认视角名：视角 1、视角 2、… */
+function nextViewName() {
+  let maxN = 0;
+  loadCustomViews().forEach((v) => {
+    const m = String(v.name).match(/(\d+)/);
+    if (m) maxN = Math.max(maxN, Number(m[1]));
+  });
+  return '视角 ' + (maxN + 1);
+}
+
+function renderCustomViews() {
+  const wrap = $('#custom-views');
+  wrap.innerHTML = '';
+  const views = loadCustomViews();
+  if (!views.length) {
+    const n = document.createElement('div');
+    n.className = 'note';
+    n.textContent = '暂无自定义视角：调整视角后点「保存视角」即可收藏。';
+    wrap.append(n);
+    return;
+  }
+  views.forEach((v, i) => {
+    const row = document.createElement('div');
+    row.className = 'view-item';
+    const b = document.createElement('button');
+    b.className = 'mode-btn view-btn';
+    b.textContent = v.name;
+    b.title = '点击应用该视角';
+    b.addEventListener('click', () => applyView(v.az ?? 0, v.el ?? 15, v.d ?? 14));
+    const re = document.createElement('button');
+    re.className = 'mode-btn rename-btn';
+    re.textContent = '✎';
+    re.title = '重命名';
+    re.addEventListener('click', () => startViewRename(row, b, i));
+    const del = document.createElement('button');
+    del.className = 'view-del';
+    del.textContent = '×';
+    del.title = '删除该视角';
+    del.addEventListener('click', () => {
+      const list = loadCustomViews();
+      list.splice(i, 1);
+      saveCustomViews(list);
+      renderCustomViews();
+    });
+    row.append(b, re, del);
+    wrap.append(row);
+  });
+}
+
+/* 内联重命名：把名称按钮替换成输入框，回车/失焦确认，Esc 取消 */
+function startViewRename(row, nameBtn, i) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'rename-input';
+  input.value = nameBtn.textContent;
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    if (save) {
+      const list = loadCustomViews();
+      const newName = input.value.trim();
+      if (newName && list[i]) {
+        list[i].name = newName;
+        saveCustomViews(list);
+      }
+    }
+    renderCustomViews();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish(true);
+    else if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+  row.replaceChild(input, nameBtn);
+  input.focus();
+  input.select();
+}
+
+function buildViewUI() {
+  const wrap = $('#view-rows');
+  wrap.innerHTML = '';
+  viewRowRefs.length = 0;
+  const rows = [
+    { key: 'az', label: '方位角(°)', min: 0, max: 360, step: 1 },
+    { key: 'el', label: '仰角(°)', min: 0, max: 87, step: 1 },
+    { key: 'd', label: '距离(m)', min: 4, max: 40, step: 0.5 },
+  ];
+  for (const r of rows) {
+    const cell = document.createElement('div');
+    cell.className = 'view-cell';
+    const lab = document.createElement('span');
+    lab.className = 'cell-label';
+    lab.textContent = r.label;
+    const controlsDiv = document.createElement('div');
+    controlsDiv.className = 'cell-controls';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = String(r.min);
+    range.max = String(r.max);
+    range.step = String(r.step);
+    const num = document.createElement('input');
+    num.type = 'number';
+    num.className = 'ctrl-num';
+    num.min = String(r.min);
+    num.max = String(r.max);
+    num.step = String(r.step);
+    const commit = (raw) => {
+      const v = clamp(Number(raw), r.min, r.max);
+      const cur = currentView();
+      cur[r.key] = v;
+      applyView(cur.az, cur.el, cur.d);
+    };
+    /* 拖动滑杆时只实时预览数值，松手(change)才移动相机，避免输入与相机同步互相打架 */
+    range.addEventListener('input', () => {
+      num.value = range.value;
+    });
+    range.addEventListener('change', () => commit(range.value));
+    num.addEventListener('change', () => commit(num.value));
+    num.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        commit(num.value);
+        num.blur();
+      }
+    });
+    controlsDiv.append(range, num);
+    cell.append(lab, controlsDiv);
+    wrap.append(cell);
+    viewRowRefs.push({ key: r.key, range, num });
+  }
+  const pw = $('#view-presets');
+  pw.innerHTML = '';
+  VIEW_PRESETS.forEach((p) => {
+    const b = document.createElement('button');
+    b.className = 'mode-btn';
+    b.textContent = p.name;
+    b.addEventListener('click', () => {
+      if (p.isDefault) controls.reset();
+      else applyView(p.az, p.el, p.d);
+    });
+    pw.append(b);
+  });
+  syncViewInputs();
+}
+
 /* ---------------------------- 动画循环 ---------------------------- */
 const clock = new THREE.Clock();
 let fpsFrames = 0;
@@ -1241,11 +1478,23 @@ PRESETS.forEach((p, i) => {
   $('#preset-select').append(opt);
 });
 wireGlobalUI();
+try {
+  buildViewUI();
+  renderCustomViews();
+} catch (err) {
+  console.error('视角面板初始化失败（不影响场景渲染）', err);
+}
 let loaded = false;
 try {
-  loaded = loadSaved();
-} catch (err) {
-  showFatal('配置加载失败：' + (err && err.message ? err.message : err));
+  const d = JSON.parse(localStorage.getItem(DEFAULT_KEY));
+  if (d) loaded = loadState(d);
+} catch {}
+if (!loaded) {
+  try {
+    loaded = loadSaved();
+  } catch (err) {
+    showFatal('配置加载失败：' + (err && err.message ? err.message : err));
+  }
 }
 if (!loaded) {
   try {

@@ -317,6 +317,62 @@ input[type="color"] {
   transition: all 0.15s;
 }
 .mode-btn.on { color: var(--accent); border-color: var(--accent); background: rgba(91, 195, 255, 0.1); }
+
+/* 视角控制坞（画面中间底部） */
+#view-dock {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: min(600px, calc(100% - 24px));
+  background: rgba(13, 17, 26, 0.88);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 8px 12px 10px;
+  backdrop-filter: blur(8px);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dock-title { font-size: 10px; letter-spacing: 2px; color: var(--muted); }
+#view-rows { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.view-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cell-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.cell-controls { display: flex; align-items: center; gap: 6px; }
+.cell-controls input[type="range"] { flex: 1; min-width: 0; }
+.cell-controls .ctrl-num { width: 52px; flex: none; }
+#view-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+#view-presets .mode-btn { padding: 3px 8px; font-size: 12px; }
+.dock-actions { display: flex; gap: 6px; align-items: center; }
+#custom-views { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.view-item { display: flex; align-items: center; gap: 4px; }
+.view-item .view-btn { font-size: 12px; padding: 3px 8px; text-align: left; }
+.view-item .rename-btn { font-size: 11px; padding: 3px 6px; }
+.view-item .view-del { width: 22px; font-size: 13px; line-height: 1.3; }
+.rename-input {
+  width: 120px;
+  background: #12161f;
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.view-del {
+  width: 26px;
+  flex: none;
+  border: 1px solid rgba(255, 107, 107, 0.5);
+  background: rgba(255, 107, 107, 0.08);
+  color: #ff8a8a;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1.4;
+  font-family: inherit;
+}
+.view-del:hover { background: rgba(255, 107, 107, 0.2); }
 .shadow-row {
   display: flex;
   align-items: center;
@@ -337,9 +393,8 @@ input[type="color"] {
 
 #hint {
   position: absolute;
-  left: 50%;
+  left: 14px;
   bottom: 14px;
-  transform: translateX(-50%);
   color: rgba(255, 255, 255, 0.6);
   font-size: 12px;
   pointer-events: none;

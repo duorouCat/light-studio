@@ -28,6 +28,7 @@
         <label class="preset-label">灯光预设
           <select id="preset-select"></select>
         </label>
+        <button id="btn-save-default" class="chip">保存为默认配置</button>
         <button id="btn-autorotate" class="chip">自动旋转</button>
         <button id="btn-markers" class="chip on">光源标记</button>
         <button id="btn-grid" class="chip on">参考网格</button>
@@ -51,6 +52,15 @@
       <canvas id="scene-canvas"></canvas>
       <div id="hint">左键拖拽旋转 · 滚轮缩放 · 右键平移 · 点击模型选中编辑</div>
       <div id="fps"></div>
+      <div id="view-dock">
+        <div class="dock-title">视角 · CAMERA</div>
+        <div id="view-rows"></div>
+        <div id="view-presets"></div>
+        <div class="dock-actions">
+          <button id="btn-save-view" class="chip">保存视角</button>
+        </div>
+        <div id="custom-views"></div>
+      </div>
     </main>
 
     <aside id="panel-light" class="panel">
