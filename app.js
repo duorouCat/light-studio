@@ -211,10 +211,10 @@ bboxGroup.add(dashWitness);
 const bboxLabels = { w: null, d: null, h: null };
 const bboxV = new THREE.Vector3();
 
-/* 文字标签（纯文字：无黑框、无面板背景，带阴影保证可读；字号占屏幕 12%，不随视角缩放） */
+/* 文字标签（纯文字：无黑框、无面板背景，高分辨率贴图保证清晰；字号占屏幕 12%，不随视角缩放） */
 function makeTextSprite(text) {
-  const pad = 10;
-  const fontPx = 64;
+  const pad = 30;
+  const fontPx = 160;
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   ctx.font = 'bold ' + fontPx + 'px "Segoe UI", "Microsoft YaHei", sans-serif';
@@ -224,13 +224,14 @@ function makeTextSprite(text) {
   canvas.height = h;
   ctx.font = ctx.font;
   ctx.fillStyle = '#eaf6ff';
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
-  ctx.shadowBlur = 6;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
+  ctx.shadowBlur = 8;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
-  ctx.fillText(text, w / 2, h / 2 + 1);
+  ctx.fillText(text, w / 2, h / 2 + 2);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
   const sp = new THREE.Sprite(mat);
   sp.userData.ratio = w / h;
@@ -293,7 +294,7 @@ function updateBBoxDims() {
   const cy = (minY + maxY) / 2;
   const cz = (minZ + maxZ) / 2;
   const o = 2 * Math.max(w, d, h); // 标注距模型的距离 = 包围框最长边 × 2
-  const num = (v) => v.toFixed(1); // 纯数值，不带单位
+  const num = (v) => String(Math.round(v * 10)); // 数值 ×10 取整，不带小数与单位
 
   /* 12 条棱的包围框（世界轴对齐，随模型旋转实时变化） */
   const cs = [
@@ -313,10 +314,10 @@ function updateBBoxDims() {
   geo = bboxLine.geometry;
   geo.setAttribute('position', new THREE.BufferAttribute(boxArr, 3));
 
-  /* 三向尺寸线：前方（宽）、左侧（深）、右侧（高），均在包围框外侧 o 距离 */
+  /* 三向尺寸线：宽/深贴在地面上（y=minY），高度标注在右侧竖直；均在包围框外侧 o 距离 */
   const pts = [];
-  pts.push(minX, cy, maxZ + o, maxX, cy, maxZ + o);
-  pts.push(minX - o, cy, minZ, minX - o, cy, maxZ);
+  pts.push(minX, minY, maxZ + o, maxX, minY, maxZ + o);
+  pts.push(minX - o, minY, minZ, minX - o, minY, maxZ);
   pts.push(maxX + o, minY, cz, maxX + o, maxY, cz);
   const dimArr = new Float32Array(pts);
   let dgeo = dimLines.geometry;
@@ -325,12 +326,12 @@ function updateBBoxDims() {
   dgeo = dimLines.geometry;
   dgeo.setAttribute('position', new THREE.BufferAttribute(dimArr, 3));
 
-  /* 虚线引出：每条尺寸线两端指向所标注的线框棱 */
+  /* 虚线引出：每条尺寸线两端指向所标注的线框棱（贴地的线指向框底棱，高度线指向右侧棱） */
   const dpts = [];
-  dpts.push(minX, cy, maxZ + o, minX, cy, maxZ); // 宽线左端 → 前左棱
-  dpts.push(maxX, cy, maxZ + o, maxX, cy, maxZ); // 宽线右端 → 前右棱
-  dpts.push(minX - o, cy, minZ, minX, cy, minZ); // 深线前端 → 左前棱
-  dpts.push(minX - o, cy, maxZ, minX, cy, maxZ); // 深线后端 → 左后棱
+  dpts.push(minX, minY, maxZ + o, minX, minY, maxZ); // 宽线左端 → 框前下左角
+  dpts.push(maxX, minY, maxZ + o, maxX, minY, maxZ); // 宽线右端 → 框前下右角
+  dpts.push(minX - o, minY, minZ, minX, minY, minZ); // 深线前端 → 框左下前角
+  dpts.push(minX - o, minY, maxZ, minX, minY, maxZ); // 深线后端 → 框左下后角
   dpts.push(maxX + o, minY, cz, maxX, minY, cz); // 高线底端 → 右下棱
   dpts.push(maxX + o, maxY, cz, maxX, maxY, cz); // 高线顶端 → 右上棱
   const dArr = new Float32Array(dpts);
@@ -341,9 +342,9 @@ function updateBBoxDims() {
   wgeo.setAttribute('position', new THREE.BufferAttribute(dArr, 3));
   dashWitness.computeLineDistances();
 
-  /* 标签：紧贴各自尺寸线、保持水平，字号大且屏幕尺寸恒定 */
-  setBBoxLabel('w', num(w), cx, cy + 0.25, maxZ + o);
-  setBBoxLabel('d', num(d), minX - o, cy + 0.25, cz);
+  /* 标签：贴地标注的标签略高于地面线，高度标签在右侧线外侧，均保持水平、字号大且屏幕尺寸恒定 */
+  setBBoxLabel('w', num(w), cx, minY + 0.35, maxZ + o);
+  setBBoxLabel('d', num(d), minX - o, minY + 0.35, cz);
   setBBoxLabel('h', num(h), maxX + o + 0.3, cy, cz);
   for (const key of ['w', 'd', 'h']) {
     const sp = bboxLabels[key];
@@ -922,7 +923,7 @@ function buildModelParams() {
   check('包围框与尺寸', showBBox, (v) => { showBBox = v; scheduleSave(); });
   const nB = document.createElement('div');
   nB.className = 'note';
-  nB.textContent = '「包围框与尺寸」：固定 XYZ 方向的包围立方体线框 + 长/宽/高尺寸，标注距模型 = 包围框最长边 × 2，虚线引出线指向所标注的线框棱，文字为纯文本、保持水平且不随视角缩放。';
+  nB.textContent = '「包围框与尺寸」：固定 XYZ 方向的包围立方体线框 + 长/宽/高尺寸（数值 ×10 取整），宽/深标注贴地、高度标注在右侧竖直，标注距模型 = 包围框最长边 × 2，虚线引出线指向被标注的棱，纯文本标签保持水平且不随视角缩放。';
   wrap.append(nB);
   slider('自转速度', 0, 1.2, 0.01, st.spin, (v) => { st.spin = v; scheduleSave(); });
   const resetRow = document.createElement('div');
