@@ -1,0 +1,1220 @@
+/* =====================================================================
+ *  光影实验室 · Light Studio
+ *  基于 Three.js 的 3D 光影演示与调节工具
+ * ===================================================================== */
+import * as THREE from 'three';
+import { OrbitControls } from './vendor/OrbitControls.js';
+
+/* ------------------------------ 工具 ------------------------------ */
+const $ = (sel) => document.querySelector(sel);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const deg2rad = (d) => (d * Math.PI) / 180;
+const fmt = (v) => String(Math.round(v * 100) / 100);
+
+/** 开尔文色温 → 线性 RGB（Tanner Helland 近似） */
+function kelvinToRGB(k) {
+  const t = clamp(k, 1000, 40000) / 100;
+  let r, g, b;
+  if (t <= 66) r = 255;
+  else r = 329.698727446 * Math.pow(t - 60, -0.1332047592);
+  if (t <= 66) g = 99.4708025861 * Math.log(t) - 161.1195681661;
+  else g = 288.1221695283 * Math.pow(t - 60, -0.0755148492);
+  if (t >= 66) b = 255;
+  else if (t <= 19) b = 0;
+  else b = 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  return [clamp(r, 0, 255) / 255, clamp(g, 0, 255) / 255, clamp(b, 0, 255) / 255];
+}
+const kelvinToHex = (k) =>
+  '#' + kelvinToRGB(k).map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+const lightColor = (def) =>
+  def.custom ? new THREE.Color(def.customColor) : new THREE.Color(...kelvinToRGB(def.kelvin));
+
+/* --------------------------- 渲染器与场景 --------------------------- */
+const canvas = $('#scene-canvas');
+const viewport = $('#viewport');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.useLegacyLights = true; // 经典光照标定：点/聚光强度 0-10 量级，兼容性最佳
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
+camera.position.set(0, 5.2, 15.5);
+
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 1.0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 4;
+controls.maxDistance = 60;
+controls.maxPolarAngle = 1.53;
+controls.autoRotateSpeed = 0.8;
+
+function resize() {
+  const w = viewport.clientWidth;
+  const h = viewport.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------------------------- 地面与网格 ---------------------------- */
+/* 地面使用受光材质：点/聚光灯的光斑（圆形/锥形）与阴影都能在地面显示 */
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(500, 500),
+  new THREE.MeshStandardMaterial({ color: 0x151b28, roughness: 0.95, metalness: 0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const GRID_DIVISIONS = 36;
+const grid = new THREE.GridHelper(GRID_DIVISIONS, GRID_DIVISIONS, 0x8a93a8, 0x3a4152);
+grid.material.transparent = true;
+grid.material.opacity = 0.4;
+grid.position.y = 0.01;
+scene.add(grid);
+let showGrid = true;
+
+/* r160 的 GridHelper 没有 setColors 方法，手动更新顶点颜色实现网格换色 */
+function setGridColors(centerColor, gridColor) {
+  const attr = grid.geometry.attributes.color;
+  if (!attr) return;
+  const a = new THREE.Color(centerColor);
+  const b = new THREE.Color(gridColor);
+  const arr = attr.array;
+  const center = GRID_DIVISIONS / 2;
+  for (let i = 0; i <= GRID_DIVISIONS; i++) {
+    const c = i === center ? a : b;
+    const off = i * 12; // 每条线 4 个顶点 × 3 分量
+    for (let k = 0; k < 4; k++) {
+      arr[off + k * 3] = c.r;
+      arr[off + k * 3 + 1] = c.g;
+      arr[off + k * 3 + 2] = c.b;
+    }
+  }
+  attr.needsUpdate = true;
+}
+
+/* 各背景对应的地面与网格配色（保证光斑/网格在各种背景下可见） */
+const BG_STYLES = {
+  studio: { floor: 0x151b28, gridA: 0x8a93a8, gridB: 0x3a4152 },
+  day:    { floor: 0xcfd9e8, gridA: 0x5a6a85, gridB: 0x94a4bd },
+  dusk:   { floor: 0x7a5a45, gridA: 0xb08a6a, gridB: 0x6a4a3a },
+  night:  { floor: 0x101724, gridA: 0x6a7488, gridB: 0x2c3345 },
+};
+
+/* ------------------------------ 模型 ------------------------------ */
+const MODEL_DEFS = [
+  { id: 'box',    name: '立方体',   baseY: 0.70, ring: 1.20, kind: 'none',   flat: false, color: '#e6b56a', build: (s) => new THREE.BoxGeometry(1.4, 1.4, 1.4) },
+  { id: 'sphere', name: '球体',     baseY: 0.85, ring: 1.00, kind: 'seg',    segLabel: '球面段数', flat: false, color: '#7fb8e6', build: (s) => new THREE.SphereGeometry(0.85, s.seg, Math.max(8, Math.round(s.seg / 2))) },
+  { id: 'cyl',    name: '圆柱',     baseY: 0.75, ring: 1.00, kind: 'seg',    segLabel: '径向段数', flat: false, color: '#d8b06a', build: (s) => new THREE.CylinderGeometry(0.75 * s.topRatio, 0.75, 1.5, s.seg, 1, false) },
+  { id: 'cone',   name: '圆锥',     baseY: 0.80, ring: 1.00, kind: 'seg',    segLabel: '径向段数', flat: false, color: '#e6a06f', build: (s) => new THREE.ConeGeometry(0.9, 1.6, s.seg, 1, false) },
+  { id: 'tetra',  name: '四面体',   baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#7fd8a4', build: (s) => new THREE.TetrahedronGeometry(0.95, s.detail) },
+  { id: 'octa',   name: '八面体',   baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#e07f9e', build: (s) => new THREE.OctahedronGeometry(0.95, s.detail) },
+  { id: 'icosa',  name: '二十面体', baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#b48fe6', build: (s) => new THREE.IcosahedronGeometry(0.95, s.detail) },
+  { id: 'dodeca', name: '十二面体', baseY: 0.95, ring: 1.00, kind: 'detail', flat: true,  color: '#e6a07f', build: (s) => new THREE.DodecahedronGeometry(0.95, s.detail) },
+  { id: 'knot',   name: '圆环结',   baseY: 0.62, ring: 1.05, kind: 'seg',    segLabel: '管状段数', flat: false, color: '#8fe6d2', build: (s) => new THREE.TorusKnotGeometry(0.52, 0.17, s.seg, 8) },
+];
+
+const defaultModelState = (def) => ({
+  color: def.color,
+  metalness: 0.25,
+  roughness: 0.38,
+  sx: 1, sy: 1, sz: 1,
+  rx: 0, ry: 0, rz: 0,
+  seg: 32,
+  detail: 0,
+  topRatio: 1,
+  wire: false,
+  edges: false,
+  spin: 0,
+});
+const modelState = {};
+MODEL_DEFS.forEach((d) => (modelState[d.id] = defaultModelState(d)));
+
+let selectedId = 'box';
+let shownIds = new Set(['box']);
+let faceSnapMode = false;
+const currentEntry = () => modelEntries.find((e) => e.def.id === selectedId);
+
+/* 选中指示：地面金色圆环（不随模型旋转，稳定美观） */
+const selRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.88, 1.0, 64),
+  new THREE.MeshBasicMaterial({ color: 0xffd166, side: THREE.DoubleSide, transparent: true, opacity: 0.95, depthWrite: false })
+);
+selRing.rotation.x = -Math.PI / 2;
+selRing.position.y = 0.02;
+scene.add(selRing);
+
+function updateSelectionRing() {
+  const entry = currentEntry();
+  selRing.position.x = entry.group.position.x;
+  selRing.scale.set(entry.halfWidth, entry.halfDepth, 1);
+}
+
+/* 多模型陈列布局：按各自占地宽度自动排开、整体居中 */
+function layoutModels() {
+  const shown = modelEntries.filter((e) => e.group.visible);
+  const gap = 0.9;
+  let x = 0;
+  for (const e of shown) {
+    x += e.halfWidth;
+    e.group.position.x = x;
+    x += e.halfWidth + gap;
+  }
+  const total = Math.max(x - gap, 0);
+  for (const e of shown) e.group.position.x -= total / 2;
+}
+
+const modelEntries = MODEL_DEFS.map((def) => {
+  const st = modelState[def.id];
+  const group = new THREE.Group();
+  const mesh = new THREE.Mesh(def.build(st), new THREE.MeshStandardMaterial({ flatShading: def.flat }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  /* 边线叠加层：挂在 mesh 下自动继承缩放/旋转/贴地，微放大避免与面重叠闪烁 */
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(mesh.geometry),
+    new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.9 })
+  );
+  edges.scale.setScalar(1.002);
+  edges.visible = false;
+  mesh.add(edges);
+  group.add(mesh);
+  group.visible = false;
+  scene.add(group);
+  return { def, group, mesh, edges, state: st };
+});
+
+function applyModel(entry) {
+  const st = entry.state;
+  const m = entry.mesh;
+  m.scale.set(st.sx, st.sy, st.sz);
+  m.rotation.set(deg2rad(st.rx), deg2rad(st.ry), deg2rad(st.rz));
+  m.position.y = entry.def.baseY * st.sy;
+  entry.group.position.y = 0;
+  const mat = m.material;
+  mat.color.set(st.color);
+  mat.metalness = st.metalness;
+  mat.roughness = st.roughness;
+  mat.wireframe = st.wire;
+  entry.edges.visible = st.edges;
+  entry.edges.material.color.set(new THREE.Color(st.color).multiplyScalar(0.3));
+  computeFootprint(entry);
+  layoutModels();
+  if (entry.def.id === selectedId) updateSelectionRing();
+}
+
+/* 依据缩放+朝向计算占地（贴地高度 / XZ 半径），用于自动布局与地面圆环 */
+function computeFootprint(entry) {
+  const m = entry.mesh;
+  const g = m.geometry;
+  if (!g.boundingBox) g.computeBoundingBox();
+  const bb = g.boundingBox;
+  m.updateMatrix();
+  const mat4 = m.matrix;
+  const tmp = new THREE.Vector3();
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const x of [bb.min.x, bb.max.x])
+    for (const y of [bb.min.y, bb.max.y])
+      for (const z of [bb.min.z, bb.max.z]) {
+        tmp.set(x, y, z).applyMatrix4(mat4);
+        minX = Math.min(minX, tmp.x);
+        maxX = Math.max(maxX, tmp.x);
+        minY = Math.min(minY, tmp.y);
+        minZ = Math.min(minZ, tmp.z);
+        maxZ = Math.max(maxZ, tmp.z);
+      }
+  entry.halfWidth = (maxX - minX) / 2 + 0.2;
+  entry.halfDepth = (maxZ - minZ) / 2 + 0.2;
+  if (!isFinite(entry.halfWidth) || !isFinite(minY)) {
+    /* 数据异常时的安全兜底，避免模型被放到无限远而不可见 */
+    entry.halfWidth = 1.2;
+    entry.halfDepth = 1.2;
+    entry.group.position.y = 0.5;
+    return;
+  }
+  entry.group.position.y = -minY + 0.03; // 留 3cm 间隙，避免与地面重合闪烁
+}
+function rebuildModel(entry) {
+  entry.mesh.geometry.dispose();
+  entry.mesh.geometry = entry.def.build(entry.state);
+  entry.edges.geometry.dispose();
+  entry.edges.geometry = new THREE.EdgesGeometry(entry.mesh.geometry);
+  applyModel(entry);
+}
+modelEntries.forEach(applyModel);
+
+/* ---------------------------- 灯光系统 ---------------------------- */
+const MAX_LIGHTS = 6;
+const TYPE_MAX = { directional: 10, point: 10, spot: 10 };
+
+const defaultLightDefs = () => [
+  { type: 'directional', kelvin: 6500, intensity: 2.5, azimuth: -35,  elevation: 40, distance: 7, custom: false, customColor: '#ffffff', shadow: true,  enabled: true,  angle: 30, penumbra: 0.5 },
+  { type: 'point',       kelvin: 4000, intensity: 4,   azimuth: 95,   elevation: 22, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true,  angle: 30, penumbra: 0.5 },
+  { type: 'point',       kelvin: 8000, intensity: 5,   azimuth: 200,  elevation: 45, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 30, penumbra: 0.5 },
+  { type: 'spot',        kelvin: 5500, intensity: 6,   azimuth: -150, elevation: 55, distance: 9, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 28, penumbra: 0.5 },
+  { type: 'directional', kelvin: 3000, intensity: 1.5, azimuth: 150,  elevation: 15, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 30, penumbra: 0.5 },
+  { type: 'point',       kelvin: 2000, intensity: 6,   azimuth: 0,    elevation: 8,  distance: 6, custom: false, customColor: '#ffffff', shadow: false, enabled: false, angle: 30, penumbra: 0.5 },
+];
+let lightCount = 2;
+const lightDefs = defaultLightDefs();
+
+const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+const hemi = new THREE.HemisphereLight(0xffffff, 0x2f3340, 0.4);
+hemi.visible = false;
+scene.add(ambient, hemi);
+
+function createLightObject(type) {
+  let light;
+  if (type === 'directional') light = new THREE.DirectionalLight(0xffffff, 1);
+  else if (type === 'point') light = new THREE.PointLight(0xffffff, 1, 25, 2);
+  else light = new THREE.SpotLight(0xffffff, 1, 25, 0.5, 0.4, 2);
+  light.castShadow = false;
+  const target = new THREE.Object3D();
+  target.position.set(0, 0.9, 0);
+  light.target = target;
+  if (type === 'directional') {
+    light.shadow.mapSize.set(2048, 2048);
+    const sc = light.shadow.camera;
+    sc.left = -11; sc.right = 11; sc.top = 11; sc.bottom = -11;
+    sc.near = 1; sc.far = 45;
+    sc.updateProjectionMatrix();
+    light.shadow.bias = -0.0004;
+    light.shadow.normalBias = 0.02;
+  } else {
+    light.shadow.mapSize.set(1024, 1024);
+    light.shadow.camera.near = 0.5;
+    light.shadow.camera.far = 45;
+    light.shadow.bias = -0.0002;
+    light.shadow.normalBias = 0.01;
+  }
+  scene.add(light, target);
+  return { light, target };
+}
+
+const lightObjs = lightDefs.map((d) => createLightObject(d.type));
+
+function swapLightObject(i) {
+  const old = lightObjs[i];
+  scene.remove(old.light, old.target);
+  old.light.dispose();
+  if (old.light.shadow) old.light.shadow.dispose();
+  lightObjs[i] = createLightObject(lightDefs[i].type);
+}
+
+/* 灯光对象类型是否与配置一致（平行光/点光源/聚光灯） */
+function lightTypeMatches(light, type) {
+  return (
+    (type === 'directional' && light.isDirectionalLight) ||
+    (type === 'point' && light.isPointLight) ||
+    (type === 'spot' && light.isSpotLight)
+  );
+}
+
+/* 配置切换/加载后，重建与配置类型不一致的灯光对象 */
+function reconcileLightObjects() {
+  lightDefs.forEach((d, i) => {
+    if (!lightTypeMatches(lightObjs[i].light, d.type)) swapLightObject(i);
+  });
+}
+
+function lightPosition(def) {
+  const az = deg2rad(def.azimuth);
+  const el = deg2rad(def.elevation);
+  const d = def.distance;
+  return new THREE.Vector3(d * Math.cos(el) * Math.sin(az), d * Math.sin(el), d * Math.cos(el) * Math.cos(az));
+}
+
+function updateLight(i) {
+  const def = lightDefs[i];
+  const { light, target } = lightObjs[i];
+  light.color.copy(lightColor(def));
+  light.intensity = def.intensity;
+  light.visible = def.enabled && i < lightCount;
+  light.castShadow = def.shadow && light.visible;
+  target.position.set(0, 0.9, 0);
+  if (def.type === 'spot') {
+    light.angle = deg2rad(def.angle);
+    light.penumbra = def.penumbra;
+    light.shadow.camera.fov = def.angle * 2;
+    light.shadow.camera.updateProjectionMatrix();
+  }
+  light.position.copy(lightPosition(def));
+  updateMarker(i);
+}
+const updateAllLights = () => lightDefs.forEach((_, i) => updateLight(i));
+
+/* --------------------------- 光源标记 --------------------------- */
+const TARGET_POS = new THREE.Vector3(0, 0.9, 0);
+const UP = new THREE.Vector3(0, 1, 0);
+const DOWN = new THREE.Vector3(0, -1, 0);
+
+function createMarker() {
+  const group = new THREE.Group();
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.14, 16, 16),
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      toneMapped: false,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      opacity: 0.95,
+      depthWrite: false,
+    })
+  );
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const line = new THREE.Line(
+    lineGeo,
+    new THREE.LineBasicMaterial({ color: 0xffffff, toneMapped: false, transparent: true, opacity: 0.35, depthWrite: false })
+  );
+  const arrow = new THREE.ArrowHelper(UP, new THREE.Vector3(), 1.3, 0xffffff, 0.32, 0.18);
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(0.3, 1, 20, 1, true),
+    new THREE.MeshBasicMaterial({ wireframe: true, color: 0xffffff, toneMapped: false, transparent: true, opacity: 0.3, depthWrite: false })
+  );
+  group.add(sphere, line, arrow, cone);
+  scene.add(group);
+  return { group, sphere, line, arrow, cone };
+}
+const markers = lightDefs.map(() => createMarker());
+
+function updateMarker(i) {
+  const def = lightDefs[i];
+  const m = markers[i];
+  const pos = lightPosition(def);
+  const color = lightColor(def);
+  m.sphere.position.copy(pos);
+  m.sphere.material.color.copy(color);
+  const linePos = m.line.geometry.attributes.position;
+  linePos.setXYZ(0, pos.x, pos.y, pos.z);
+  linePos.setXYZ(1, TARGET_POS.x, TARGET_POS.y, TARGET_POS.z);
+  linePos.needsUpdate = true;
+  m.line.material.color.copy(color);
+  const dir = TARGET_POS.clone().sub(pos).normalize();
+  m.arrow.visible = def.type === 'directional';
+  if (def.type === 'directional') {
+    m.arrow.position.copy(pos);
+    m.arrow.setDirection(dir);
+    m.arrow.setColor(color);
+    m.arrow.setLength(1.3, 0.32, 0.18);
+  }
+  m.cone.visible = def.type === 'spot';
+  if (def.type === 'spot') {
+    const h = def.distance * 0.8;
+    const r = Math.tan(deg2rad(def.angle) / 2) * h + 0.06;
+    m.cone.geometry.dispose();
+    m.cone.geometry = new THREE.ConeGeometry(r, h, 24, 1, true);
+    m.cone.position.copy(pos).addScaledVector(dir, h / 2);
+    m.cone.quaternion.setFromUnitVectors(UP, dir.clone().negate());
+    m.cone.material.color.copy(color);
+  }
+}
+
+let showMarkers = true;
+function refreshMarkers() {
+  lightDefs.forEach((d, i) => {
+    markers[i].group.visible = showMarkers && d.enabled && i < lightCount;
+  });
+}
+
+/* --------------------------- 全局光照参数 --------------------------- */
+let ambientI = 0.5;
+let ambientK = 6500;
+let hemiOn = false;
+let hemiI = 0.4;
+let exposure = 1;
+let bg = 'studio';
+let autorotate = false;
+
+function updateGlobalLights() {
+  ambient.color.setRGB(...kelvinToRGB(ambientK));
+  ambient.intensity = ambientI;
+  hemi.visible = hemiOn;
+  hemi.intensity = hemiI;
+  hemi.color.setRGB(...kelvinToRGB(ambientK));
+  renderer.toneMappingExposure = exposure;
+  viewport.classList.remove('bg-studio', 'bg-day', 'bg-dusk', 'bg-night');
+  viewport.classList.add('bg-' + bg);
+  const bs = BG_STYLES[bg] ?? BG_STYLES.studio;
+  ground.material.color.setHex(bs.floor);
+  setGridColors(bs.gridA, bs.gridB);
+}
+
+/* ------------------------------ 预设 ------------------------------ */
+const PRESETS = [
+  {
+    name: '影棚标准', count: 2, bg: 'studio', exposure: 1.0,
+    ambient: { i: 0.5, k: 6500 }, hemi: { on: false, i: 0.4 },
+    defs: [
+      { type: 'directional', kelvin: 6500, intensity: 2.5, azimuth: -35, elevation: 40, distance: 7, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 4000, intensity: 4, azimuth: 95, elevation: 22, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+    ],
+  },
+  {
+    name: '正午日光', count: 2, bg: 'day', exposure: 1.15,
+    ambient: { i: 0.35, k: 7000 }, hemi: { on: true, i: 0.45 },
+    defs: [
+      { type: 'directional', kelvin: 5800, intensity: 4, azimuth: -15, elevation: 68, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 7000, intensity: 3, azimuth: 140, elevation: 18, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+    ],
+  },
+  {
+    name: '日出黄昏', count: 2, bg: 'dusk', exposure: 1.05,
+    ambient: { i: 0.15, k: 2200 }, hemi: { on: false, i: 0.2 },
+    defs: [
+      { type: 'directional', kelvin: 2400, intensity: 2, azimuth: -55, elevation: 10, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 2000, intensity: 5, azimuth: 95, elevation: 6, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+    ],
+  },
+  {
+    name: '清冷月光', count: 2, bg: 'night', exposure: 0.9,
+    ambient: { i: 0.1, k: 9000 }, hemi: { on: false, i: 0.15 },
+    defs: [
+      { type: 'directional', kelvin: 9500, intensity: 1, azimuth: -40, elevation: 42, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 8000, intensity: 1.2, azimuth: 160, elevation: 25, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+    ],
+  },
+  {
+    name: '舞台霓虹', count: 4, bg: 'night', exposure: 1.0,
+    ambient: { i: 0.05, k: 4000 }, hemi: { on: false, i: 0.1 },
+    defs: [
+      { type: 'point', kelvin: 4000, intensity: 6, azimuth: -75, elevation: 15, distance: 6, custom: true, customColor: '#ff2d78', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 4000, intensity: 6, azimuth: 75, elevation: 15, distance: 6, custom: true, customColor: '#00e0ff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 4000, intensity: 5, azimuth: 0, elevation: 48, distance: 7, custom: true, customColor: '#ffb300', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 4000, intensity: 4, azimuth: 180, elevation: 20, distance: 6, custom: true, customColor: '#8a5cff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+    ],
+  },
+  {
+    name: '影棚柔光', count: 4, bg: 'studio', exposure: 1.1,
+    ambient: { i: 0.42, k: 6000 }, hemi: { on: true, i: 0.3 },
+    defs: [
+      { type: 'directional', kelvin: 5500, intensity: 1.6, azimuth: 0, elevation: 38, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 5000, intensity: 3.5, azimuth: 105, elevation: 10, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'point', kelvin: 5000, intensity: 3.5, azimuth: -105, elevation: 10, distance: 7, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
+      { type: 'spot', kelvin: 4500, intensity: 7, azimuth: 175, elevation: 55, distance: 9, custom: false, customColor: '#ffffff', shadow: false, enabled: true, angle: 42, penumbra: 0.6 },
+    ],
+  },
+];
+
+function applyPreset(idx) {
+  const p = PRESETS[idx];
+  lightCount = p.count;
+  lightDefs.forEach((d, i) => {
+    Object.assign(d, p.defs[i] ?? defaultLightDefs()[i]);
+  });
+  reconcileLightObjects();
+  ambientI = p.ambient.i;
+  ambientK = p.ambient.k;
+  hemiOn = p.hemi.on;
+  hemiI = p.hemi.i;
+  exposure = p.exposure;
+  bg = p.bg;
+  $('#preset-select').value = String(idx);
+  syncGlobalUI();
+  updateGlobalLights();
+  updateAllLights();
+  renderLightUI();
+  refreshMarkers();
+  scheduleSave();
+}
+
+/* ------------------------------ 模型 UI ------------------------------ */
+function buildModelButtons() {
+  const wrap = $('#model-buttons');
+  MODEL_DEFS.forEach((def) => {
+    const b = document.createElement('button');
+    b.className = 'model-btn';
+    b.dataset.id = def.id;
+    b.textContent = def.name;
+    b.addEventListener('click', () => toggleModel(def.id));
+    wrap.append(b);
+  });
+}
+
+function refreshModelButtons() {
+  document.querySelectorAll('.model-btn').forEach((b) => {
+    b.classList.toggle('on', shownIds.has(b.dataset.id));
+    b.classList.toggle('active', b.dataset.id === selectedId);
+  });
+  const countEl = $('#model-count');
+  if (countEl) countEl.textContent = `正在展示 ${shownIds.size} / ${MODEL_DEFS.length} 个模型 · 点亮按钮可增减`;
+}
+
+function applyVisibility() {
+  modelEntries.forEach((e) => (e.group.visible = shownIds.has(e.def.id)));
+}
+
+function toggleModel(id) {
+  if (shownIds.has(id)) {
+    if (shownIds.size === 1) return; // 至少展示一个模型
+    shownIds.delete(id);
+    selectModel(selectedId === id ? [...shownIds][0] : selectedId);
+  } else {
+    shownIds.add(id);
+    selectModel(id);
+  }
+}
+
+function selectModel(id) {
+  selectedId = id;
+  applyVisibility();
+  layoutModels();
+  refreshModelButtons();
+  updateSelectionRing();
+  buildModelParams();
+  scheduleSave();
+}
+
+function buildModelParams() {
+  const st = modelState[selectedId];
+  const def = MODEL_DEFS.find((d) => d.id === selectedId);
+  const wrap = $('#model-params');
+  wrap.innerHTML = '';
+  const row = (label) => {
+    const r = document.createElement('div');
+    r.className = 'ctrl-row';
+    const lab = document.createElement('span');
+    lab.className = 'ctrl-label';
+    lab.textContent = label;
+    r.append(lab);
+    wrap.append(r);
+    return r;
+  };
+  /* 滑杆 + 可直接输入数值的数字框（双向同步） */
+  const slider = (label, min, max, step, value, onChange) => {
+    const r = row(label);
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.value = String(value);
+    const num = document.createElement('input');
+    num.type = 'number';
+    num.className = 'ctrl-num';
+    num.min = String(min);
+    num.max = String(max);
+    num.step = String(step);
+    num.value = String(value);
+    const commit = (raw) => {
+      const v = clamp(Number(raw), min, max);
+      input.value = String(v);
+      num.value = String(v);
+      onChange(v);
+    };
+    input.addEventListener('input', () => commit(Number(input.value)));
+    num.addEventListener('change', () => commit(num.value));
+    num.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        commit(num.value);
+        num.blur();
+      }
+    });
+    r.append(input, num);
+  };
+  const check = (label, checked, onChange) => {
+    const r = row(label);
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = checked;
+    box.addEventListener('change', () => onChange(box.checked));
+    r.append(box);
+  };
+
+  const color = document.createElement('input');
+  color.type = 'color';
+  color.value = st.color;
+  color.addEventListener('input', () => {
+    st.color = color.value;
+    applyModel(currentEntry());
+    scheduleSave();
+  });
+  row('颜色').append(color);
+
+  slider('金属度', 0, 1, 0.01, st.metalness, (v) => { st.metalness = v; applyModel(currentEntry()); scheduleSave(); });
+  slider('粗糙度', 0, 1, 0.01, st.roughness, (v) => { st.roughness = v; applyModel(currentEntry()); scheduleSave(); });
+  slider('缩放 X', 0.3, 2.5, 0.02, st.sx, (v) => { st.sx = v; applyModel(currentEntry()); scheduleSave(); });
+  slider('缩放 Y', 0.3, 2.5, 0.02, st.sy, (v) => { st.sy = v; applyModel(currentEntry()); scheduleSave(); });
+  slider('缩放 Z', 0.3, 2.5, 0.02, st.sz, (v) => { st.sz = v; applyModel(currentEntry()); scheduleSave(); });
+  if (def.kind === 'seg') {
+    slider(def.segLabel, 8, 64, 1, st.seg, (v) => { st.seg = v; rebuildModel(currentEntry()); scheduleSave(); });
+    if (def.id === 'cyl') {
+      slider('顶面半径比', 0, 1, 0.02, st.topRatio, (v) => { st.topRatio = v; rebuildModel(currentEntry()); scheduleSave(); });
+    }
+  } else if (def.kind === 'detail') {
+    slider('细节层级', 0, 3, 1, st.detail, (v) => { st.detail = v; rebuildModel(currentEntry()); scheduleSave(); });
+  } else {
+    const n = document.createElement('div');
+    n.className = 'note';
+    n.textContent = '该模型为规则立方体，可通过「缩放 X / Y / Z」调整长宽高比例。';
+    wrap.append(n);
+  }
+  slider('绕X轴旋转(°)', 0, 360, 1, st.rx, (v) => { st.rx = v; applyModel(currentEntry()); scheduleSave(); });
+  slider('绕Y轴旋转(°)', 0, 360, 1, st.ry, (v) => { st.ry = v; applyModel(currentEntry()); scheduleSave(); });
+  slider('绕Z轴旋转(°)', 0, 360, 1, st.rz, (v) => { st.rz = v; applyModel(currentEntry()); scheduleSave(); });
+  const orientRow = document.createElement('div');
+  orientRow.className = 'mode-row';
+  const btnResetOrient = document.createElement('button');
+  btnResetOrient.className = 'mode-btn';
+  btnResetOrient.textContent = '重置朝向';
+  btnResetOrient.addEventListener('click', () => {
+    st.rx = 0; st.ry = 0; st.rz = 0;
+    applyModel(currentEntry());
+    buildModelParams();
+    scheduleSave();
+  });
+  const btnSnap = document.createElement('button');
+  btnSnap.className = 'mode-btn' + (faceSnapMode ? ' on' : '');
+  btnSnap.textContent = '吸附面朝地：' + (faceSnapMode ? '开' : '关');
+  btnSnap.addEventListener('click', () => {
+    faceSnapMode = !faceSnapMode;
+    showToast(faceSnapMode ? '已开启「吸附面朝地」：点击模型表面，该面将转至水平并朝向地面' : '已关闭「吸附面朝地」');
+    buildModelParams();
+    scheduleSave();
+  });
+  orientRow.append(btnResetOrient, btnSnap);
+  wrap.append(orientRow);
+  const n2 = document.createElement('div');
+  n2.className = 'note';
+  n2.textContent = '「吸附面朝地」：开启后点击模型表面，被点击的面会转到水平并朝向地面（模型骑坐在该面上）。';
+  wrap.append(n2);
+  check('显示边线', st.edges, (v) => { st.edges = v; applyModel(currentEntry()); scheduleSave(); });
+  check('线框显示', st.wire, (v) => { st.wire = v; applyModel(currentEntry()); scheduleSave(); });
+  slider('自转速度', 0, 1.2, 0.01, st.spin, (v) => { st.spin = v; scheduleSave(); });
+  const resetRow = document.createElement('div');
+  resetRow.className = 'mode-row';
+  const btnResetModel = document.createElement('button');
+  btnResetModel.className = 'mode-btn';
+  btnResetModel.textContent = '重置模型参数';
+  btnResetModel.addEventListener('click', () => {
+    const keep = { rx: st.rx, ry: st.ry, rz: st.rz };
+    Object.assign(st, defaultModelState(def), keep);
+    rebuildModel(currentEntry());
+    buildModelParams();
+    scheduleSave();
+    showToast('已重置「' + def.name + '」的模型参数（朝向保持不变）');
+  });
+  resetRow.append(btnResetModel);
+  wrap.append(resetRow);
+}
+
+/* ------------------------------ 灯光 UI ------------------------------ */
+function refreshSwatch(card, i) {
+  const def = lightDefs[i];
+  const sw = card.querySelector('.light-swatch');
+  if (sw) sw.style.background = def.custom ? def.customColor : kelvinToHex(def.kelvin);
+}
+
+function renderLightUI() {
+  const list = $('#light-list');
+  list.innerHTML = '';
+  for (let i = 0; i < MAX_LIGHTS; i++) {
+    const def = lightDefs[i];
+    const card = document.createElement('div');
+    card.className = 'light-card' + (i < lightCount ? '' : ' hidden');
+    card.innerHTML = `
+      <div class="light-head">
+        <span class="light-name">光源 ${i + 1}</span>
+        <select class="light-type">
+          <option value="directional"${def.type === 'directional' ? ' selected' : ''}>平行光</option>
+          <option value="point"${def.type === 'point' ? ' selected' : ''}>点光源</option>
+          <option value="spot"${def.type === 'spot' ? ' selected' : ''}>聚光灯</option>
+        </select>
+        <label class="mini-toggle"><input type="checkbox" class="light-enabled"${def.enabled ? ' checked' : ''}>启用</label>
+        <span class="swatch light-swatch"></span>
+      </div>
+      <div class="mode-row">
+        <button class="mode-btn${def.custom ? '' : ' on'}" data-mode="kelvin">色温模式</button>
+        <button class="mode-btn${def.custom ? ' on' : ''}" data-mode="custom">自定义颜色</button>
+        <input type="color" class="light-color" value="${def.customColor}"${def.custom ? '' : ' hidden'}>
+      </div>
+      <div class="ctrl-row kelvin-only${def.custom ? ' hidden' : ''}">
+        <span class="ctrl-label">色温(K)</span>
+        <input type="range" class="light-kelvin" min="1000" max="12000" step="50" value="${def.kelvin}">
+        <input type="number" class="ctrl-num light-kelvin-num" min="1000" max="12000" step="50" value="${def.kelvin}">
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-label">强度</span>
+        <input type="range" class="light-intensity" min="0" max="${TYPE_MAX[def.type]}" step="0.05" value="${def.intensity}">
+        <input type="number" class="ctrl-num light-intensity-num" min="0" max="${TYPE_MAX[def.type]}" step="0.05" value="${def.intensity}">
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-label">方位角(°)</span>
+        <input type="range" class="light-azimuth" min="0" max="360" step="1" value="${def.azimuth}">
+        <input type="number" class="ctrl-num light-azimuth-num" min="0" max="360" step="1" value="${def.azimuth}">
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-label">仰角(°)</span>
+        <input type="range" class="light-elevation" min="-90" max="90" step="1" value="${def.elevation}">
+        <input type="number" class="ctrl-num light-elevation-num" min="-90" max="90" step="1" value="${def.elevation}">
+      </div>
+      <div class="ctrl-row">
+        <span class="ctrl-label">距离(m)</span>
+        <input type="range" class="light-distance" min="2" max="15" step="0.1" value="${def.distance}">
+        <input type="number" class="ctrl-num light-distance-num" min="2" max="15" step="0.1" value="${def.distance}">
+      </div>
+      <div class="ctrl-row spot-only${def.type === 'spot' ? '' : ' hidden'}">
+        <span class="ctrl-label">锥角(°)</span>
+        <input type="range" class="light-angle" min="10" max="70" step="1" value="${def.angle}">
+        <input type="number" class="ctrl-num light-angle-num" min="10" max="70" step="1" value="${def.angle}">
+      </div>
+      <div class="ctrl-row spot-only${def.type === 'spot' ? '' : ' hidden'}">
+        <span class="ctrl-label">羽化</span>
+        <input type="range" class="light-penumbra" min="0" max="1" step="0.02" value="${def.penumbra}">
+        <input type="number" class="ctrl-num light-penumbra-num" min="0" max="1" step="0.02" value="${def.penumbra}">
+      </div>
+      <label class="shadow-row"><input type="checkbox" class="light-shadow"${def.shadow ? ' checked' : ''}>投射阴影</label>
+    `;
+    const q = (s) => card.querySelector(s);
+    q('.light-type').addEventListener('change', (e) => {
+      def.type = e.target.value;
+      swapLightObject(i);
+      updateLight(i);
+      renderLightUI();
+      scheduleSave();
+    });
+    q('.light-enabled').addEventListener('change', (e) => {
+      def.enabled = e.target.checked;
+      updateLight(i);
+      refreshMarkers();
+      scheduleSave();
+    });
+    card.querySelectorAll('.mode-btn').forEach((btn) =>
+      btn.addEventListener('click', () => {
+        def.custom = btn.dataset.mode === 'custom';
+        updateLight(i);
+        renderLightUI();
+        scheduleSave();
+      })
+    );
+    q('.light-color').addEventListener('input', (e) => {
+      def.customColor = e.target.value;
+      updateLight(i);
+      refreshSwatch(card, i);
+      scheduleSave();
+    });
+    q('.light-kelvin').addEventListener('input', () => refreshSwatch(card, i));
+    const bindRange = (cls, key) => {
+      const el = q(cls);
+      const num = q(cls + '-num');
+      const commit = (raw) => {
+        const v = clamp(Number(raw), Number(el.min), Number(el.max));
+        def[key] = v;
+        el.value = String(v);
+        num.value = String(v);
+        updateLight(i);
+        scheduleSave();
+      };
+      el.addEventListener('input', () => commit(Number(el.value)));
+      num.addEventListener('change', () => commit(num.value));
+      num.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          commit(num.value);
+          num.blur();
+        }
+      });
+    };
+    bindRange('.light-kelvin', 'kelvin');
+    bindRange('.light-intensity', 'intensity');
+    bindRange('.light-azimuth', 'azimuth');
+    bindRange('.light-elevation', 'elevation');
+    bindRange('.light-distance', 'distance');
+    bindRange('.light-angle', 'angle');
+    bindRange('.light-penumbra', 'penumbra');
+    q('.light-shadow').addEventListener('change', (e) => {
+      def.shadow = e.target.checked;
+      updateLight(i);
+      scheduleSave();
+    });
+    list.append(card);
+    refreshSwatch(card, i);
+  }
+}
+
+/* ------------------------------ 全局 UI ------------------------------ */
+const setChip = (btn, on) => btn.classList.toggle('on', on);
+
+function syncGlobalUI() {
+  const setNum = (sel, v) => {
+    const el = $(sel);
+    if (el) el.value = v;
+  };
+  $('#light-count').value = lightCount;
+  setNum('#light-count-num', lightCount);
+  $('#ambient-intensity').value = ambientI;
+  setNum('#ambient-intensity-num', ambientI);
+  $('#ambient-kelvin').value = ambientK;
+  setNum('#ambient-kelvin-num', ambientK);
+  $('#ambient-swatch').style.background = kelvinToHex(ambientK);
+  $('#hemi-toggle').checked = hemiOn;
+  $('#hemi-intensity').value = hemiI;
+  setNum('#hemi-intensity-num', hemiI);
+  $('#exposure').value = exposure;
+  setNum('#exposure-num', exposure);
+  $('#bg-select').value = bg;
+  viewport.classList.remove('bg-studio', 'bg-day', 'bg-dusk', 'bg-night');
+  viewport.classList.add('bg-' + bg);
+  setChip($('#btn-autorotate'), autorotate);
+  setChip($('#btn-markers'), showMarkers);
+  setChip($('#btn-grid'), showGrid);
+}
+
+/* 提示气泡 */
+let toastTimer = 0;
+function showToast(text) {
+  const el = $('#toast');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+/* 全局错误提示条：启动/运行报错时直接显示在页面上，便于定位问题 */
+function showFatal(msg) {
+  try {
+    let el = document.getElementById('err-bar');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'err-bar';
+      document.body.append(el);
+    }
+    el.textContent = '⚠ ' + msg;
+    el.style.display = 'block';
+  } catch {}
+}
+window.addEventListener('error', (e) => showFatal('脚本错误：' + (e.message || 'unknown')));
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  showFatal('异步错误：' + ((r && r.message) || String(r)));
+});
+
+/* 启动兜底：无论配置加载结果如何，都保证模型与灯光面板完整渲染 */
+function ensureUI() {
+  try {
+    if (!MODEL_DEFS.some((d) => d.id === selectedId)) selectedId = 'box';
+    if (!shownIds.size || ![...shownIds].some((id) => MODEL_DEFS.some((d) => d.id === id))) {
+      shownIds = new Set(['box']);
+    }
+    if (!shownIds.has(selectedId)) selectedId = [...shownIds][0];
+    reconcileLightObjects();
+    applyVisibility();
+    layoutModels();
+    refreshModelButtons();
+    updateSelectionRing();
+    buildModelParams();
+    updateGlobalLights();
+    updateAllLights();
+    renderLightUI();
+    refreshMarkers();
+    syncGlobalUI();
+  } catch (err) {
+    showFatal('界面初始化异常：' + (err && err.message ? err.message : err));
+  }
+}
+
+function wireGlobalUI() {
+  /* 滑杆 + 数字输入框联动 */
+  const wireRow = (rangeSel, numSel, commit) => {
+    const range = $(rangeSel);
+    const num = $(numSel);
+    const onCommit = (v) => {
+      commit(v);
+      range.value = String(v);
+      num.value = String(v);
+    };
+    range.addEventListener('input', () => onCommit(Number(range.value)));
+    num.addEventListener('change', () => onCommit(clamp(Number(num.value), Number(range.min), Number(range.max))));
+    num.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') num.blur();
+    });
+  };
+  wireRow('#light-count', '#light-count-num', (v) => {
+    lightCount = Math.round(v);
+    updateAllLights();
+    refreshMarkers();
+    renderLightUI();
+    scheduleSave();
+  });
+  wireRow('#ambient-intensity', '#ambient-intensity-num', (v) => {
+    ambientI = v;
+    updateGlobalLights();
+    scheduleSave();
+  });
+  wireRow('#ambient-kelvin', '#ambient-kelvin-num', (v) => {
+    ambientK = Math.round(v);
+    $('#ambient-swatch').style.background = kelvinToHex(ambientK);
+    updateGlobalLights();
+    scheduleSave();
+  });
+  $('#hemi-toggle').addEventListener('change', (e) => {
+    hemiOn = e.target.checked;
+    updateGlobalLights();
+    scheduleSave();
+  });
+  wireRow('#hemi-intensity', '#hemi-intensity-num', (v) => {
+    hemiI = v;
+    updateGlobalLights();
+    scheduleSave();
+  });
+  wireRow('#exposure', '#exposure-num', (v) => {
+    exposure = v;
+    renderer.toneMappingExposure = exposure;
+    scheduleSave();
+  });
+  $('#bg-select').addEventListener('change', (e) => {
+    bg = e.target.value;
+    updateGlobalLights();
+    scheduleSave();
+  });
+  $('#preset-select').addEventListener('change', (e) => applyPreset(Number(e.target.value)));
+  $('#btn-autorotate').addEventListener('click', (e) => {
+    autorotate = !autorotate;
+    controls.autoRotate = autorotate;
+    setChip(e.currentTarget, autorotate);
+    scheduleSave();
+  });
+  $('#btn-markers').addEventListener('click', (e) => {
+    showMarkers = !showMarkers;
+    setChip(e.currentTarget, showMarkers);
+    refreshMarkers();
+    scheduleSave();
+  });
+  $('#btn-grid').addEventListener('click', (e) => {
+    showGrid = !showGrid;
+    grid.visible = showGrid;
+    setChip(e.currentTarget, showGrid);
+    scheduleSave();
+  });
+  $('#btn-shot').addEventListener('click', () => {
+    renderer.render(scene, camera);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'light-studio-' + Date.now() + '.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    }, 'image/png');
+  });
+  $('#btn-fullscreen').addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.();
+  });
+  $('#btn-reset').addEventListener('click', () => {
+    if (!window.confirm('确定要重置全部设置吗？将恢复出厂预设。')) return;
+    try { localStorage.removeItem(SAVE_KEY); } catch {}
+    MODEL_DEFS.forEach((d) => (modelState[d.id] = defaultModelState(d)));
+    modelEntries.forEach((e) => {
+      e.state = modelState[e.def.id];
+      rebuildModel(e);
+    });
+    shownIds = new Set(['box']);
+    faceSnapMode = false;
+    applyPreset(0);
+    selectModel('box');
+    controls.reset();
+  });
+}
+
+/* ---------------------------- 持久化 ---------------------------- */
+const SAVE_KEY = 'light-studio-v3';
+
+function serializeState() {
+  return {
+    lightCount,
+    defs: lightDefs,
+    ambientI,
+    ambientK,
+    hemiOn,
+    hemiI,
+    exposure,
+    bg,
+    selectedId,
+    shownIds: [...shownIds],
+    faceSnapMode,
+    modelState,
+    autorotate,
+    showMarkers,
+    showGrid,
+  };
+}
+
+let saveTimer = 0;
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(serializeState()));
+    } catch {}
+  }, 400);
+}
+
+function loadState(s) {
+  if (!s || typeof s !== 'object') return false;
+  lightCount = clamp(Math.round(s.lightCount ?? 2), 1, MAX_LIGHTS);
+  (s.defs ?? []).forEach((d, i) => {
+    if (i < MAX_LIGHTS) {
+      lightDefs[i] = { ...defaultLightDefs()[i], ...d };
+      const tMax = TYPE_MAX[lightDefs[i].type] ?? 10;
+      lightDefs[i].intensity = clamp(Number(lightDefs[i].intensity) || 0, 0, tMax);
+    }
+  });
+  reconcileLightObjects();
+  ambientI = s.ambientI ?? 0.5;
+  ambientK = s.ambientK ?? 6500;
+  hemiOn = !!s.hemiOn;
+  hemiI = s.hemiI ?? 0.4;
+  exposure = s.exposure ?? 1;
+  bg = s.bg ?? 'studio';
+  autorotate = !!s.autorotate;
+  showMarkers = s.showMarkers !== false;
+  showGrid = s.showGrid !== false;
+  if (s.modelState) {
+    Object.keys(s.modelState).forEach((id) => {
+      if (modelState[id]) {
+        const def = MODEL_DEFS.find((d) => d.id === id);
+        const ms = { ...defaultModelState(def), ...s.modelState[id] };
+        for (const k of ['sx', 'sy', 'sz']) ms[k] = clamp(Number(ms[k]) || 1, 0.3, 2.5);
+        ms.rx = normDeg(Number(ms.rx) || 0);
+        ms.ry = normDeg(Number(ms.ry) || 0);
+        ms.rz = normDeg(Number(ms.rz) || 0);
+        ms.seg = clamp(Math.round(Number(ms.seg) || 32), 8, 64);
+        ms.detail = clamp(Math.round(Number(ms.detail) || 0), 0, 3);
+        modelState[id] = ms;
+      }
+    });
+  }
+  selectedId = MODEL_DEFS.some((d) => d.id === s.selectedId) ? s.selectedId : 'box';
+  if (Array.isArray(s.shownIds) && s.shownIds.length) {
+    const valid = s.shownIds.filter((id) => MODEL_DEFS.some((d) => d.id === id));
+    if (valid.length) shownIds = new Set(valid);
+  }
+  faceSnapMode = !!s.faceSnapMode;
+  controls.autoRotate = autorotate;
+  grid.visible = showGrid;
+  syncGlobalUI();
+  updateGlobalLights();
+  updateAllLights();
+  renderLightUI();
+  refreshMarkers();
+  modelEntries.forEach((e) => {
+    e.state = modelState[e.def.id];
+    rebuildModel(e);
+  });
+  selectModel(selectedId);
+  return true;
+}
+
+function loadSaved() {
+  let s;
+  try {
+    s = JSON.parse(localStorage.getItem(SAVE_KEY));
+  } catch {}
+  return loadState(s);
+}
+
+/* ---------------------------- 交互拾取 ---------------------------- */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const visibleMeshes = () => modelEntries.filter((e) => e.group.visible).map((e) => e.mesh);
+
+function pickAt(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hit = raycaster.intersectObjects(visibleMeshes(), false)[0];
+  if (!hit) return null;
+  return { entry: modelEntries.find((e) => e.mesh === hit.object), hit };
+}
+
+const normDeg = (d) => ((Math.round(d) % 360) + 360) % 360;
+
+/* 将点击到的面转到水平并朝向地面（面法线对齐世界 -Y） */
+function snapFaceUp(entry, hit) {
+  const m = entry.mesh;
+  m.updateMatrix();
+  const normal = hit.face.normal.clone().applyMatrix3(new THREE.Matrix3().getNormalMatrix(m.matrix)).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(normal, DOWN);
+  m.quaternion.premultiply(q);
+  const st = entry.state;
+  const e = new THREE.Euler().setFromQuaternion(m.quaternion, 'XYZ');
+  st.rx = normDeg((e.x * 180) / Math.PI);
+  st.ry = normDeg((e.y * 180) / Math.PI);
+  st.rz = normDeg((e.z * 180) / Math.PI);
+  applyModel(entry);
+  buildModelParams();
+  scheduleSave();
+}
+
+let downAt = null;
+canvas.addEventListener('pointerdown', (e) => (downAt = [e.clientX, e.clientY]));
+canvas.addEventListener('pointerup', (e) => {
+  if (!downAt) return;
+  const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
+  downAt = null;
+  if (moved > 6) return;
+  const res = pickAt(e.clientX, e.clientY);
+  if (!res) return;
+  if (res.entry.def.id !== selectedId) {
+    selectModel(res.entry.def.id);
+    if (!faceSnapMode) return;
+  }
+  if (faceSnapMode && res.hit.face) snapFaceUp(res.entry, res.hit);
+});
+canvas.addEventListener('pointermove', (e) => {
+  canvas.style.cursor = pickAt(e.clientX, e.clientY) ? 'pointer' : 'grab';
+});
+
+/* ---------------------------- 动画循环 ---------------------------- */
+const clock = new THREE.Clock();
+let fpsFrames = 0;
+let fpsTime = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const t = clock.elapsedTime;
+  for (const e of modelEntries) {
+    if (e.group.visible) e.group.rotation.y += e.state.spin * dt;
+  }
+  markers.forEach((m, i) => m.sphere.scale.setScalar(1 + Math.sin(t * 3 + i * 1.7) * 0.18));
+  controls.update();
+  renderer.render(scene, camera);
+  fpsFrames += 1;
+  fpsTime += dt;
+  if (fpsTime >= 0.5) {
+    $('#fps').textContent = Math.round(fpsFrames / fpsTime) + ' FPS';
+    fpsFrames = 0;
+    fpsTime = 0;
+  }
+}
+
+/* ------------------------------ 启动 ------------------------------ */
+buildModelButtons();
+PRESETS.forEach((p, i) => {
+  const opt = document.createElement('option');
+  opt.value = String(i);
+  opt.textContent = p.name;
+  $('#preset-select').append(opt);
+});
+wireGlobalUI();
+let loaded = false;
+try {
+  loaded = loadSaved();
+} catch (err) {
+  showFatal('配置加载失败：' + (err && err.message ? err.message : err));
+}
+if (!loaded) {
+  try {
+    applyPreset(0);
+  } catch {}
+}
+ensureUI();
+requestAnimationFrame(animate);

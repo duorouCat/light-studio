@@ -1,0 +1,17 @@
+# ---- 系统文件 ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- 依赖与构建产物 ----
+node_modules/
+dist/
+build/
+
+# ---- 日志与临时文件 ----
+*.log
+_bat-test.bat
+test-*.bat
+
+# 说明：vendor/ 为本地离线依赖（Three.js r160），
+# 为保证仓库克隆后开箱即用，随仓库一起提交。

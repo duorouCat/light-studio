@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>光影实验室 · Light Studio</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand">
+        <span class="logo">◐</span>
+        <div class="titles">
+          <h1>光影实验室</h1>
+          <span class="sub">LIGHT STUDIO</span>
+        </div>
+      </div>
+      <div class="top-controls">
+        <label class="preset-label">灯光预设
+          <select id="preset-select"></select>
+        </label>
+        <button id="btn-autorotate" class="chip">自动旋转</button>
+        <button id="btn-markers" class="chip on">光源标记</button>
+        <button id="btn-grid" class="chip on">参考网格</button>
+        <button id="btn-shot" class="chip">保存截图</button>
+        <button id="btn-fullscreen" class="chip">全屏</button>
+      </div>
+    </header>
+
+    <aside id="panel-model" class="panel">
+      <div class="panel-title"><span class="dot m"></span>模型 · MODEL</div>
+      <div id="model-buttons"></div>
+      <div id="model-count" class="note"></div>
+      <div id="model-params"></div>
+    </aside>
+
+    <main id="viewport" class="bg-studio">
+      <canvas id="scene-canvas"></canvas>
+      <div id="hint">左键拖拽旋转 · 滚轮缩放 · 右键平移 · 点击模型选中编辑</div>
+      <div id="fps"></div>
+    </main>
+
+    <aside id="panel-light" class="panel">
+      <div class="panel-title"><span class="dot l"></span>光照 · LIGHTING</div>
+      <div class="section">
+        <div class="section-title">全局环境</div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">光源数量</span>
+          <input type="range" id="light-count" min="1" max="6" step="1" value="2">
+          <input type="number" class="ctrl-num" id="light-count-num" min="1" max="6" step="1" value="2">
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">环境光</span>
+          <input type="range" id="ambient-intensity" min="0" max="2" step="0.01" value="0.5">
+          <input type="number" class="ctrl-num" id="ambient-intensity-num" min="0" max="2" step="0.01" value="0.5">
+        </div>
+        <div class="ctrl-row kelvin-row">
+          <span class="ctrl-label">环境色温(K)</span>
+          <input type="range" id="ambient-kelvin" min="1000" max="12000" step="50" value="6500">
+          <input type="number" class="ctrl-num" id="ambient-kelvin-num" min="1000" max="12000" step="50" value="6500">
+          <span class="swatch" id="ambient-swatch"></span>
+        </div>
+        <div class="ctrl-row hemi-row">
+          <span class="ctrl-label">半球光</span>
+          <input type="checkbox" id="hemi-toggle">
+          <input type="range" id="hemi-intensity" min="0" max="1.5" step="0.01" value="0.4">
+          <input type="number" class="ctrl-num" id="hemi-intensity-num" min="0" max="1.5" step="0.01" value="0.4">
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">曝光度</span>
+          <input type="range" id="exposure" min="0.3" max="2.5" step="0.01" value="1">
+          <input type="number" class="ctrl-num" id="exposure-num" min="0.3" max="2.5" step="0.01" value="1">
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">背景</span>
+          <select id="bg-select">
+            <option value="studio">暗色影棚</option>
+            <option value="day">明亮天空</option>
+            <option value="dusk">黄昏渐变</option>
+            <option value="night">深夜</option>
+          </select>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-title">各光源</div>
+        <div id="light-list"></div>
+      </div>
+      <button id="btn-reset" class="danger-btn">重置全部设置</button>
+    </aside>
+  </div>
+  <div id="toast"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

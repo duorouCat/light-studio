@@ -1,0 +1,10 @@
+{
+  "name": "light-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "光影实验室 · 基于 Three.js 的 3D 光影演示与调节工具",
+  "scripts": {
+    "start": "node serve.js"
+  }
+}
