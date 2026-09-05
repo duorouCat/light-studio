@@ -231,7 +231,7 @@ function makeTextSprite(text) {
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
   const sp = new THREE.Sprite(mat);
   sp.userData.ratio = w / h;
-  sp.userData.screenFrac = 0.06;
+  sp.userData.screenFrac = 0.12;
   sp.scale.set(1, 1, 1);
   return sp;
 }
@@ -289,8 +289,8 @@ function updateBBoxDims() {
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
   const cz = (minZ + maxZ) / 2;
-  const o = Math.max(w, d, h); // 标注距模型的距离 ≥ 包围框最长边
-  const cm = (v) => (v * 10).toFixed(1) + 'cm'; // 1 场景单位 = 10cm
+  const o = 2 * Math.max(w, d, h); // 标注距模型的距离 = 包围框最长边 × 2
+  const num = (v) => v.toFixed(1); // 纯数值，不带单位
 
   /* 12 条棱的包围框（世界轴对齐，随模型旋转实时变化） */
   const cs = [
@@ -329,15 +329,15 @@ function updateBBoxDims() {
   dgeo.setAttribute('position', new THREE.BufferAttribute(dimArr, 3));
 
   /* 标签：更外侧，字号大且屏幕尺寸恒定 */
-  setBBoxLabel('w', cm(w), cx, cy, maxZ + o + 0.18);
-  setBBoxLabel('d', cm(d), minX - o - 0.18, cy, cz);
-  setBBoxLabel('h', cm(h), maxX + o + 0.18, cy, cz);
+  setBBoxLabel('w', num(w), cx, cy, maxZ + o + 0.18);
+  setBBoxLabel('d', num(d), minX - o - 0.18, cy, cz);
+  setBBoxLabel('h', num(h), maxX + o + 0.18, cy, cz);
   for (const key of ['w', 'd', 'h']) {
     const sp = bboxLabels[key];
     if (!sp) continue;
     sp.getWorldPosition(bboxV);
     const dist = bboxV.distanceTo(camera.position);
-    const frac = sp.userData.screenFrac ?? 0.06;
+    const frac = sp.userData.screenFrac ?? 0.12;
     const sh = (2 * dist * Math.tan(deg2rad(camera.fov) / 2) * frac);
     sp.scale.set(sh * (sp.userData.ratio ?? 5), sh, 1);
   }
@@ -980,7 +980,7 @@ function renderLightUI() {
         <input type="number" class="ctrl-num light-elevation-num" min="-90" max="90" step="1" value="${def.elevation}">
       </div>
       <div class="ctrl-row">
-        <span class="ctrl-label">距离(m)</span>
+        <span class="ctrl-label">距离</span>
         <input type="range" class="light-distance" min="2" max="15" step="0.1" value="${def.distance}">
         <input type="number" class="ctrl-num light-distance-num" min="2" max="15" step="0.1" value="${def.distance}">
       </div>
@@ -1268,7 +1268,7 @@ function wireGlobalUI() {
       .join('/');
     const lines = [
       '光影实验室 · Light Studio',
-      '视角：方位角 ' + Math.round(v.az) + '° · 仰角 ' + Math.round(v.el) + '° · 距离 ' + v.d.toFixed(1) + 'm',
+      '视角：方位角 ' + Math.round(v.az) + '° · 仰角 ' + Math.round(v.el) + '° · 距离 ' + v.d.toFixed(1),
       '光照(' + lightCount + ')：' + (lightsTxt || '无'),
       '环境光 ' + fmt(ambientI) + ' · 曝光 ' + fmt(exposure) + ' · 背景 ' + bgName,
       '模型：' + (modelTxt || '无'),
@@ -1651,7 +1651,7 @@ function buildViewUI() {
   const rows = [
     { key: 'az', label: '方位角(°)', min: 0, max: 360, step: 1 },
     { key: 'el', label: '仰角(°)', min: 0, max: 87, step: 1 },
-    { key: 'd', label: '距离(m)', min: 4, max: 40, step: 0.5 },
+    { key: 'd', label: '距离', min: 4, max: 40, step: 0.5 },
   ];
   for (const r of rows) {
     const cell = document.createElement('div');
