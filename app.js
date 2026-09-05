@@ -182,6 +182,167 @@ function updateSelectionRing() {
   selRing.scale.set(entry.halfWidth, entry.halfDepth, 1);
 }
 
+/* ==================== 包围立方体线框与尺寸（固定 XYZ 方向） ==================== */
+let showBBox = false; // 包围框与尺寸开关
+
+const bboxGroup = new THREE.Group();
+bboxGroup.visible = false;
+scene.add(bboxGroup);
+
+const bboxLine = new THREE.LineSegments(
+  new THREE.BufferGeometry(),
+  new THREE.LineBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.45, depthTest: false })
+);
+bboxGroup.add(bboxLine);
+
+const dimLines = new THREE.LineSegments(
+  new THREE.BufferGeometry(),
+  new THREE.LineBasicMaterial({ color: 0x5bc3ff, transparent: true, opacity: 0.9, depthTest: true })
+);
+bboxGroup.add(dimLines);
+
+const bboxLabels = { w: null, d: null, h: null };
+const bboxV = new THREE.Vector3();
+
+/* 文字标签（Canvas 贴图 Sprite，字号占屏幕 6%，不随视角缩放） */
+function makeTextSprite(text) {
+  const pad = 18;
+  const fontPx = 60;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.font = 'bold ' + fontPx + 'px "Segoe UI", "Microsoft YaHei", sans-serif';
+  const w = Math.ceil(ctx.measureText(text).width) + pad * 2;
+  const h = fontPx + pad * 2;
+  canvas.width = w;
+  canvas.height = h;
+  roundRectPath(ctx, 0, 0, w, h, 12);
+  ctx.fillStyle = 'rgba(10, 14, 22, 0.85)';
+  ctx.fill();
+  ctx.strokeStyle = '#5bc3ff';
+  ctx.lineWidth = 2;
+  roundRectPath(ctx, 0, 0, w, h, 12);
+  ctx.stroke();
+  ctx.fillStyle = '#dff0ff';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, w / 2, h / 2 + 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true });
+  const sp = new THREE.Sprite(mat);
+  sp.userData.ratio = w / h;
+  sp.userData.screenFrac = 0.06;
+  sp.scale.set(1, 1, 1);
+  return sp;
+}
+
+/* 更新/复用尺寸标签（文字变化时才重建贴图） */
+function setBBoxLabel(key, text, x, y, z) {
+  if (bboxLabels[key] && bboxLabels[key].userData.text === text) {
+    bboxLabels[key].position.set(x, y, z);
+    return;
+  }
+  if (bboxLabels[key]) {
+    bboxGroup.remove(bboxLabels[key]);
+    bboxLabels[key].material.map.dispose();
+    bboxLabels[key].material.dispose();
+  }
+  const sp = makeTextSprite(text);
+  sp.userData.text = text;
+  sp.position.set(x, y, z);
+  bboxLabels[key] = sp;
+  bboxGroup.add(sp);
+}
+
+/* 每帧更新：选中模型的世界轴对齐包围框（12 棱）+ 三向尺寸（距模型 ≥ 最长边）+ 固定字号 */
+function updateBBoxDims() {
+  const entry = currentEntry();
+  if (!showBBox || !entry) {
+    bboxGroup.visible = false;
+    return;
+  }
+  bboxGroup.visible = true;
+  const m = entry.mesh;
+  m.updateMatrixWorld(true);
+  const pos = m.geometry.attributes.position;
+  if (!pos) {
+    bboxGroup.visible = false;
+    return;
+  }
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    bboxV.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+    if (bboxV.x < minX) minX = bboxV.x;
+    if (bboxV.x > maxX) maxX = bboxV.x;
+    if (bboxV.y < minY) minY = bboxV.y;
+    if (bboxV.y > maxY) maxY = bboxV.y;
+    if (bboxV.z < minZ) minZ = bboxV.z;
+    if (bboxV.z > maxZ) maxZ = bboxV.z;
+  }
+  if (!isFinite(minX)) {
+    bboxGroup.visible = false;
+    return;
+  }
+  const w = maxX - minX;
+  const d = maxZ - minZ;
+  const h = maxY - minY;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const cz = (minZ + maxZ) / 2;
+  const o = Math.max(w, d, h); // 标注距模型的距离 ≥ 包围框最长边
+  const cm = (v) => (v * 10).toFixed(1) + 'cm'; // 1 场景单位 = 10cm
+
+  /* 12 条棱的包围框（世界轴对齐，随模型旋转实时变化） */
+  const cs = [
+    minX, minY, minZ, maxX, minY, minZ, maxX, minY, maxZ, minX, minY, maxZ,
+    minX, maxY, minZ, maxX, maxY, minZ, maxX, maxY, maxZ, minX, maxY, maxZ,
+  ];
+  const edges = [0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4, 0, 4, 1, 5, 2, 6, 3, 7];
+  const boxArr = new Float32Array(edges.length * 3);
+  edges.forEach((vi, i) => {
+    boxArr[i * 3] = cs[vi * 3];
+    boxArr[i * 3 + 1] = cs[vi * 3 + 1];
+    boxArr[i * 3 + 2] = cs[vi * 3 + 2];
+  });
+  let geo = bboxLine.geometry;
+  geo.dispose();
+  bboxLine.geometry = new THREE.BufferGeometry();
+  geo = bboxLine.geometry;
+  geo.setAttribute('position', new THREE.BufferAttribute(boxArr, 3));
+
+  /* 三向尺寸线：前方（宽）、左侧（深）、右侧（高），均在包围框外侧 o 距离 */
+  const pts = [];
+  pts.push(minX, cy, maxZ + o, maxX, cy, maxZ + o);
+  pts.push(minX, cy - 0.09, maxZ + o, minX, cy + 0.09, maxZ + o);
+  pts.push(maxX, cy - 0.09, maxZ + o, maxX, cy + 0.09, maxZ + o);
+  pts.push(minX - o, cy, minZ, minX - o, cy, maxZ);
+  pts.push(minX - o, cy - 0.09, minZ, minX - o, cy + 0.09, minZ);
+  pts.push(minX - o, cy - 0.09, maxZ, minX - o, cy + 0.09, maxZ);
+  pts.push(maxX + o, minY, cz, maxX + o, maxY, cz);
+  pts.push(maxX + o - 0.09, minY, cz, maxX + o + 0.09, minY, cz);
+  pts.push(maxX + o - 0.09, maxY, cz, maxX + o + 0.09, maxY, cz);
+  const dimArr = new Float32Array(pts);
+  let dgeo = dimLines.geometry;
+  dgeo.dispose();
+  dimLines.geometry = new THREE.BufferGeometry();
+  dgeo = dimLines.geometry;
+  dgeo.setAttribute('position', new THREE.BufferAttribute(dimArr, 3));
+
+  /* 标签：更外侧，字号大且屏幕尺寸恒定 */
+  setBBoxLabel('w', cm(w), cx, cy, maxZ + o + 0.18);
+  setBBoxLabel('d', cm(d), minX - o - 0.18, cy, cz);
+  setBBoxLabel('h', cm(h), maxX + o + 0.18, cy, cz);
+  for (const key of ['w', 'd', 'h']) {
+    const sp = bboxLabels[key];
+    if (!sp) continue;
+    sp.getWorldPosition(bboxV);
+    const dist = bboxV.distanceTo(camera.position);
+    const frac = sp.userData.screenFrac ?? 0.06;
+    const sh = (2 * dist * Math.tan(deg2rad(camera.fov) / 2) * frac);
+    sp.scale.set(sh * (sp.userData.ratio ?? 5), sh, 1);
+  }
+}
+
 /* 多模型陈列布局：按各自占地宽度自动排开、整体居中 */
 function layoutModels() {
   const shown = modelEntries.filter((e) => e.group.visible);
@@ -745,6 +906,11 @@ function buildModelParams() {
   wrap.append(n2);
   check('显示边线', st.edges, (v) => { st.edges = v; applyModel(currentEntry()); scheduleSave(); });
   check('线框显示', st.wire, (v) => { st.wire = v; applyModel(currentEntry()); scheduleSave(); });
+  check('包围框与尺寸', showBBox, (v) => { showBBox = v; scheduleSave(); });
+  const nB = document.createElement('div');
+  nB.className = 'note';
+  nB.textContent = '「包围框与尺寸」：显示固定 XYZ 方向的包围立方体线框与长/宽/高尺寸，标注距模型 ≥ 包围框最长边，文字大小不随视角缩放。';
+  wrap.append(nB);
   slider('自转速度', 0, 1.2, 0.01, st.spin, (v) => { st.spin = v; scheduleSave(); });
   const resetRow = document.createElement('div');
   resetRow.className = 'mode-row';
@@ -1172,6 +1338,7 @@ function wireGlobalUI() {
       shownIds = new Set(['box']);
       faceSnapMode = false;
       addMode = true;
+      showBBox = false;
       applyPreset(0);
       selectModel('box');
     }
@@ -1197,6 +1364,7 @@ function serializeState() {
     shownIds: [...shownIds],
     faceSnapMode,
     addMode,
+    showBBox,
     modelState,
     autorotate,
     showMarkers,
@@ -1256,6 +1424,7 @@ function loadState(s) {
   }
   faceSnapMode = !!s.faceSnapMode;
   addMode = s.addMode !== false;
+  showBBox = !!s.showBBox;
   controls.autoRotate = autorotate;
   grid.visible = showGrid;
   syncGlobalUI();
@@ -1554,6 +1723,7 @@ function animate() {
     if (e.group.visible) e.group.rotation.y += e.state.spin * dt;
   }
   markers.forEach((m, i) => m.sphere.scale.setScalar(1 + Math.sin(t * 3 + i * 1.7) * 0.18));
+  updateBBoxDims();
   controls.update();
   renderer.render(scene, camera);
   fpsFrames += 1;
