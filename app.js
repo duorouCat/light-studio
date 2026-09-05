@@ -188,10 +188,14 @@ const modelEntries = MODEL_DEFS.map((def) => {
   edges.scale.setScalar(1.002);
   edges.visible = false;
   mesh.add(edges);
+  /* 尺寸标注层：与模型同朝向、随模型移动旋转 */
+  const dimGroup = new THREE.Group();
+  dimGroup.visible = false;
+  group.add(dimGroup);
   group.add(mesh);
   group.visible = false;
   scene.add(group);
-  return { def, group, mesh, edges, state: st };
+  return { def, group, mesh, edges, dimGroup, state: st };
 });
 
 function applyModel(entry) {
@@ -211,38 +215,170 @@ function applyModel(entry) {
   computeFootprint(entry);
   layoutModels();
   if (entry.def.id === selectedId) updateSelectionRing();
+  rebuildDims(entry);
 }
 
 /* 依据缩放+朝向计算占地（贴地高度 / XZ 半径），用于自动布局与地面圆环 */
 function computeFootprint(entry) {
   const m = entry.mesh;
   const g = m.geometry;
-  if (!g.boundingBox) g.computeBoundingBox();
-  const bb = g.boundingBox;
-  m.updateMatrix();
-  const mat4 = m.matrix;
-  const tmp = new THREE.Vector3();
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, minZ = Infinity, maxZ = -Infinity;
-  for (const x of [bb.min.x, bb.max.x])
-    for (const y of [bb.min.y, bb.max.y])
-      for (const z of [bb.min.z, bb.max.z]) {
-        tmp.set(x, y, z).applyMatrix4(mat4);
-        minX = Math.min(minX, tmp.x);
-        maxX = Math.max(maxX, tmp.x);
-        minY = Math.min(minY, tmp.y);
-        minZ = Math.min(minZ, tmp.z);
-        maxZ = Math.max(maxZ, tmp.z);
-      }
-  entry.halfWidth = (maxX - minX) / 2 + 0.2;
-  entry.halfDepth = (maxZ - minZ) / 2 + 0.2;
-  if (!isFinite(entry.halfWidth) || !isFinite(minY)) {
+  const pos = g.attributes.position;
+  if (!pos) {
     /* 数据异常时的安全兜底，避免模型被放到无限远而不可见 */
     entry.halfWidth = 1.2;
     entry.halfDepth = 1.2;
     entry.group.position.y = 0.5;
     return;
   }
+  m.updateMatrix();
+  const mat4 = m.matrix;
+  const tmp = new THREE.Vector3();
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, minZ = Infinity, maxZ = -Infinity;
+  /* 按全部顶点精确计算旋转/缩放后的占地（包围盒角点法在旋转后会把模型抬高） */
+  for (let i = 0; i < pos.count; i++) {
+    tmp.fromBufferAttribute(pos, i).applyMatrix4(mat4);
+    if (tmp.x < minX) minX = tmp.x;
+    if (tmp.x > maxX) maxX = tmp.x;
+    if (tmp.y < minY) minY = tmp.y;
+    if (tmp.z < minZ) minZ = tmp.z;
+    if (tmp.z > maxZ) maxZ = tmp.z;
+  }
+  entry.halfWidth = (maxX - minX) / 2 + 0.2;
+  entry.halfDepth = (maxZ - minZ) / 2 + 0.2;
+  if (!isFinite(entry.halfWidth) || !isFinite(minY)) {
+    entry.halfWidth = 1.2;
+    entry.halfDepth = 1.2;
+    entry.group.position.y = 0.5;
+    return;
+  }
   entry.group.position.y = -minY; // 模型最低点时刻贴地：吸附面平放时与地面正好重合
+}
+
+/* ============================ 尺寸标注（技术图纸风格） ============================ */
+let showDims = false; // 是否显示三维尺寸与边长标注
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/* 生成文字标签（Canvas 贴图 Sprite，始终面向相机） */
+function makeTextSprite(text) {
+  const pad = 16;
+  const fontPx = 44;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.font = 'bold ' + fontPx + 'px "Segoe UI", "Microsoft YaHei", sans-serif';
+  const w = Math.ceil(ctx.measureText(text).width) + pad * 2;
+  const h = fontPx + pad * 2;
+  canvas.width = w;
+  canvas.height = h;
+  roundRectPath(ctx, 0, 0, w, h, 12);
+  ctx.fillStyle = 'rgba(10, 14, 22, 0.85)';
+  ctx.fill();
+  ctx.strokeStyle = '#5bc3ff';
+  ctx.lineWidth = 2;
+  roundRectPath(ctx, 0, 0, w, h, 12);
+  ctx.stroke();
+  ctx.fillStyle = '#dff0ff';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, w / 2, h / 2 + 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const sp = new THREE.Sprite(mat);
+  const unit = 0.3; // 文字高度（场景单位）
+  sp.scale.set((w / h) * unit, unit, 1);
+  return sp;
+}
+
+/* 重建选中模型的技术图纸式尺寸标注：整体长/宽/高 + 各边长 */
+function rebuildDims(entry) {
+  const dg = entry.dimGroup;
+  while (dg.children.length) {
+    const c = dg.children.pop();
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) {
+      if (c.material.map) c.material.map.dispose();
+      c.material.dispose();
+    }
+  }
+  dg.visible = showDims && entry.def.id === selectedId;
+  if (!dg.visible) return;
+  const st = entry.state;
+  const g = entry.mesh.geometry;
+  if (!g.boundingBox) g.computeBoundingBox();
+  const bb = g.boundingBox;
+  const hx = ((bb.max.x - bb.min.x) / 2) * st.sx;
+  const hy = ((bb.max.y - bb.min.y) / 2) * st.sy;
+  const hz = ((bb.max.z - bb.min.z) / 2) * st.sz;
+  const o = 0.22; // 标注线外扩距离
+  const cm = (v) => (v * 10).toFixed(1) + 'cm'; // 1 场景单位 = 10cm
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x5bc3ff, transparent: true, opacity: 0.9, depthTest: false });
+
+  dg.position.copy(entry.mesh.position); // 与模型同中心高度
+  dg.rotation.copy(entry.mesh.rotation); // 与模型同朝向
+
+  const addLine = (a, b) => {
+    const seg = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2])]),
+      lineMat
+    );
+    dg.add(seg);
+  };
+  const addLabel = (text, x, y, z) => {
+    const sp = makeTextSprite(text);
+    sp.position.set(x, y, z);
+    dg.add(sp);
+  };
+  /* 宽度（X 向）：前下方 */
+  const wy = -hy - o;
+  const wz = hz + o;
+  addLine([-hx, wy, wz], [hx, wy, wz]);
+  addLine([-hx, wy - 0.09, wz], [-hx, wy + 0.09, wz]);
+  addLine([hx, wy - 0.09, wz], [hx, wy + 0.09, wz]);
+  addLabel(cm(hx * 2), 0, wy - 0.24, wz);
+  /* 深度（Z 向）：更下方 */
+  const dz = -hy - o - 0.24;
+  addLine([0, dz, -hz], [0, dz, hz]);
+  addLine([0, dz - 0.09, -hz], [0, dz + 0.09, -hz]);
+  addLine([0, dz - 0.09, hz], [0, dz + 0.09, hz]);
+  addLabel(cm(hz * 2), 0, dz - 0.24, 0);
+  /* 高度（Y 向）：右侧 */
+  const hx2 = hx + o;
+  addLine([hx2, -hy, 0], [hx2, hy, 0]);
+  addLine([hx2 - 0.09, -hy, 0], [hx2 + 0.09, -hy, 0]);
+  addLine([hx2 - 0.09, hy, 0], [hx2 + 0.09, hy, 0]);
+  addLabel(cm(hy * 2), hx2 + 0.18, 0, 0);
+
+  /* 边长标注：每种唯一长度标注一次（最多 4 种） */
+  const eg = new THREE.EdgesGeometry(g);
+  const ep = eg.attributes.position;
+  const sc = new THREE.Vector3(st.sx, st.sy, st.sz);
+  const v1 = new THREE.Vector3();
+  const v2 = new THREE.Vector3();
+  const seen = new Map();
+  for (let i = 0; i < ep.count; i += 2) {
+    v1.fromBufferAttribute(ep, i).multiply(sc);
+    v2.fromBufferAttribute(ep, i + 1).multiply(sc);
+    const len = v1.distanceTo(v2);
+    const key = len.toFixed(2);
+    if (len > 1e-4 && !seen.has(key)) seen.set(key, { a: v1.clone(), b: v2.clone(), len });
+    if (seen.size >= 4) break;
+  }
+  eg.dispose();
+  seen.forEach((item) => {
+    const mid = item.a.clone().add(item.b).multiplyScalar(0.5);
+    const dir = mid.lengthSq() > 1e-6 ? mid.clone().normalize() : new THREE.Vector3(1, 0, 0);
+    const p = mid.clone().addScaledVector(dir, 0.2);
+    addLabel(cm(item.len), p.x, p.y, p.z);
+  });
 }
 function rebuildModel(entry) {
   entry.mesh.geometry.dispose();
@@ -584,6 +720,7 @@ function selectModel(id) {
   refreshModelButtons();
   updateSelectionRing();
   buildModelParams();
+  modelEntries.forEach(rebuildDims);
   scheduleSave();
 }
 
@@ -665,6 +802,10 @@ function buildModelParams() {
     }
   } else if (def.kind === 'detail') {
     slider('细节层级', 0, 3, 1, st.detail, (v) => { st.detail = v; rebuildModel(currentEntry()); scheduleSave(); });
+    const nD = document.createElement('div');
+    nD.className = 'note';
+    nD.textContent = '细节层级：每一级把每个面细分为 4 个小面（总面数 ×4），数值越大棱角越多、越接近球体；0 为原始多面体。';
+    wrap.append(nD);
   } else {
     const n = document.createElement('div');
     n.className = 'note';
@@ -702,6 +843,11 @@ function buildModelParams() {
   wrap.append(n2);
   check('显示边线', st.edges, (v) => { st.edges = v; applyModel(currentEntry()); scheduleSave(); });
   check('线框显示', st.wire, (v) => { st.wire = v; applyModel(currentEntry()); scheduleSave(); });
+  check('尺寸标注', showDims, (v) => {
+    showDims = v;
+    modelEntries.forEach(rebuildDims);
+    scheduleSave();
+  });
   slider('自转速度', 0, 1.2, 0.01, st.spin, (v) => { st.spin = v; scheduleSave(); });
   const resetRow = document.createElement('div');
   resetRow.className = 'mode-row';
@@ -1077,6 +1223,7 @@ function wireGlobalUI() {
       shownIds = new Set(['box']);
       faceSnapMode = false;
       addMode = true;
+      showDims = false;
       applyPreset(0);
       selectModel('box');
     }
@@ -1102,6 +1249,7 @@ function serializeState() {
     shownIds: [...shownIds],
     faceSnapMode,
     addMode,
+    showDims,
     modelState,
     autorotate,
     showMarkers,
@@ -1161,6 +1309,7 @@ function loadState(s) {
   }
   faceSnapMode = !!s.faceSnapMode;
   addMode = s.addMode !== false;
+  showDims = !!s.showDims;
   controls.autoRotate = autorotate;
   grid.visible = showGrid;
   syncGlobalUI();
