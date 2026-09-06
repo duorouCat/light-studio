@@ -49,7 +49,7 @@
 
 > 页面使用 ES Module，直接双击 `index.html`（file:// 协议）无法运行，需通过本地服务器访问。
 
-**方式一（推荐）**：双击 `启动服务器.bat` —— 自动挑选空闲端口，
+**方式一（推荐）**：双击 `光影工作室.bat` —— 自动挑选空闲端口，
 **先立即用系统默认浏览器打开页面（`start` 命令），随后再启动服务器**
 （浏览器启动耗时正好覆盖服务器启动，页面加载时服务已就绪）。
 （服务器依次尝试 Node.js → Python → npx）
@@ -76,7 +76,7 @@ light-studio/
 ├── app.js              3D 场景与全部交互逻辑
 ├── serve.js            零依赖静态服务器（Node）
 ├── package.json
-├── 启动服务器.bat       一键启动脚本
+├── 光影工作室.bat       一键启动脚本
 └── vendor/
     ├── three.module.js      Three.js r160（本地离线依赖）
     └── OrbitControls.js     轨道相机控制器
