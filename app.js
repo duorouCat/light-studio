@@ -49,7 +49,7 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.minDistance = 4;
 controls.maxDistance = 60;
-controls.maxPolarAngle = 1.53;
+controls.maxPolarAngle = Math.PI / 2; // 允许仰角降到 0°（相机与目标同高），且不会低于地面
 controls.autoRotateSpeed = 0.8;
 
 function resize() {
