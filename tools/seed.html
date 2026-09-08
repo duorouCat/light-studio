@@ -12,20 +12,17 @@
 </head>
 <body>
 <script>
-let diag = '';
 try {
-  const params = new URLSearchParams(location.search);
-  const s = params.get('s');
+  const s = new URLSearchParams(location.search).get('s');
   if (s) {
     const json = decodeURIComponent(escape(atob(s)));
     localStorage.setItem('light-studio-default-v5', json);
     localStorage.removeItem('light-studio-v5');
   }
-  if (params.get('diag') === '1') diag = '?diag=1';
 } catch (err) {
   document.title = 'seed 失败：' + err.message;
 }
-location.replace('../index.html' + diag);
+location.replace('../index.html');
 </script>
 </body>
 </html>
