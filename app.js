@@ -177,18 +177,23 @@ function refreshEnvironment() {
   for (const e of modelEntries) {
     if (e.group.visible) { hidden.push(e.group); e.group.visible = false; }
   }
-  /* 光源标记：参与反射并临时提亮 / 固定大小（自检光点清晰、不闪烁） */
+  /* 光源标记：只让“光球”参与反射（连线/箭头/锥形线框是标注，不该被照进金属里），
+     并临时提亮、固定大小，让镜面里出现干净清晰的光源光点 */
   const markerBackup = markers.map((m, i) => {
     const backup = {
       m,
       wasVisible: m.group.visible,
+      lineVisible: m.line.visible,
+      arrowVisible: m.arrow.visible,
+      coneVisible: m.cone.visible,
       sphereColor: m.sphere.material.color.clone(),
-      lineColor: m.line.material.color.clone(),
       scale: m.sphere.scale.x,
     };
     m.group.visible = lightDefs[i].enabled && i < lightCount;
+    m.line.visible = false;
+    m.arrow.visible = false;
+    m.cone.visible = false;
     m.sphere.material.color.multiplyScalar(6);
-    m.line.material.color.multiplyScalar(4);
     m.sphere.scale.setScalar(1);
     return backup;
   });
@@ -219,8 +224,10 @@ function refreshEnvironment() {
     for (const g of hidden) g.visible = true;
     for (const b of markerBackup) {
       b.m.group.visible = b.wasVisible;
+      b.m.line.visible = b.lineVisible;
+      b.m.arrow.visible = b.arrowVisible;
+      b.m.cone.visible = b.coneVisible;
       b.m.sphere.material.color.copy(b.sphereColor);
-      b.m.line.material.color.copy(b.lineColor);
       b.m.sphere.scale.setScalar(b.scale);
     }
   }
