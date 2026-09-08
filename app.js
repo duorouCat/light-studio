@@ -111,51 +111,50 @@ const BG_STYLES = {
   night:  { floor: 0x101724, gridA: 0x6a7488, gridB: 0x2c3345 },
 };
 
-/* --------------------- 环境反射贴图（IBL） --------------------- */
-/* 没有环境贴图时，金属度与粗糙度的视觉差异非常小：金属只反射环境，
-   纯点光源下金属会发黑；粗糙度也只是改变高光大小。这里用程序化生成的
-   等距柱状贴图（渐变天空 + 柔光箱亮斑）作为环境光照/反射来源，
-   于是「金属度」决定反射的镜面感与染色，「粗糙度」决定反射的锐利/模糊，
-   两个滑杆的差别一眼可见。 */
-let envI = 0.55; // 环境反射强度（全局可调）
+/* --------------------- 实时环境反射（IBL） --------------------- */
+/* 金属只有“照出真实的东西”才有意义。做法：
+   用 CubeCamera 把当前场景实时渲染成立方体贴图（含光源标记、地面、网格、
+   天空渐变），再经 PMREM 预滤波作为环境贴图 —— 于是：
+     · 金属表面真实反射光源：光源挪到哪儿，反射里的光点就跟到哪儿；
+     · 粗糙度越低反射越清晰锐利、越高越模糊（光点被糊开、地平线变柔），差别一眼可见。
+   捕捉时把模型自身隐藏，避免自反射反馈；光源标记即使被用户隐藏也照常参与反射，
+   并临时提亮，让镜面里出现清晰的光源高光。 */
+let envI = 0.7; // 环境反射强度（全局可调）
 
+const ENV_SIZE = 256;        // 立方体贴图边长
+const ENV_INTERVAL = 0.2;    // 刷新间隔（秒），拖动光源时也能跟手
 const pmrem = new THREE.PMREMGenerator(renderer);
 pmrem.compileEquirectangularShader();
-const envCache = new Map();
+pmrem.compileCubemapShader();
 
-const ENV_STYLES = {
-  studio: {
-    top: '#5a6478', horizon: '#2b3242', ground: '#141821', floor: '#0a0d13',
-    boxes: [
-      { x: 0.25, y: 0.16, r: 0.20, color: '255,250,240', a: 0.95 },
-      { x: 0.72, y: 0.24, r: 0.12, color: '220,235,255', a: 0.75 },
-    ],
-  },
-  day: {
-    top: '#cfe3ff', horizon: '#eaf2ff', ground: '#7f8ea6', floor: '#4a5668',
-    boxes: [{ x: 0.5, y: 0.07, r: 0.30, color: '255,255,255', a: 1 }],
-  },
-  dusk: {
-    top: '#2f3f6b', horizon: '#c9773f', ground: '#3a2a24', floor: '#151013',
-    boxes: [{ x: 0.5, y: 0.42, r: 0.26, color: '255,190,120', a: 0.95 }],
-  },
-  night: {
-    top: '#0d1526', horizon: '#1b2740', ground: '#080b12', floor: '#04060a',
-    boxes: [
-      { x: 0.2, y: 0.12, r: 0.14, color: '200,225,255', a: 0.8 },
-      { x: 0.75, y: 0.18, r: 0.10, color: '255,235,200', a: 0.6 },
-    ],
-  },
+const envRT = new THREE.WebGLCubeRenderTarget(ENV_SIZE, { type: THREE.HalfFloatType });
+const envCam = new THREE.CubeCamera(0.1, 150, envRT);
+scene.add(envCam);
+
+let envPMREM = null;
+let envDirty = true;
+const markEnvDirty = () => { envDirty = true; };
+
+/* 捕捉立方体贴图时的天空背景：只给一个平滑的天地渐变，
+   亮的部分交给真实光源（不再画假的柔光箱亮斑） */
+const SKY_STYLES = {
+  studio: { top: '#6b7488', horizon: '#3a4356', ground: '#1a1f2b', floor: '#0a0d13' },
+  day:    { top: '#dcebff', horizon: '#c2d8f0', ground: '#7f8ea6', floor: '#4a5668' },
+  dusk:   { top: '#3f4f7a', horizon: '#c9773f', ground: '#3a2a24', floor: '#151013' },
+  night:  { top: '#1b2740', horizon: '#101a2c', ground: '#080b12', floor: '#04060a' },
 };
+const skyCache = new Map();
 
-/* 画一张等距柱状贴图：竖向渐变天空 + 两团柔光箱亮斑 */
-function makeEnvTexture(style) {
+function skyTexture(style) {
+  const key = SKY_STYLES[style] ? style : 'studio';
+  let tex = skyCache.get(key);
+  if (tex) return tex;
   const W = 512, H = 256;
   const cv = document.createElement('canvas');
   cv.width = W;
   cv.height = H;
   const ctx = cv.getContext('2d');
-  const s = ENV_STYLES[style] ?? ENV_STYLES.studio;
+  const s = SKY_STYLES[key];
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, s.top);
   g.addColorStop(0.49, s.horizon);
@@ -163,31 +162,73 @@ function makeEnvTexture(style) {
   g.addColorStop(1, s.floor);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, H);
-  for (const b of s.boxes) {
-    const rg = ctx.createRadialGradient(b.x * W, b.y * H, 0, b.x * W, b.y * H, b.r * W);
-    rg.addColorStop(0, `rgba(${b.color},${b.a})`);
-    rg.addColorStop(0.55, `rgba(${b.color},${b.a * 0.35})`);
-    rg.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = rg;
-    ctx.fillRect(0, 0, W, H);
-  }
-  const tex = new THREE.CanvasTexture(cv);
+  tex = new THREE.CanvasTexture(cv);
   tex.mapping = THREE.EquirectangularReflectionMapping;
   tex.colorSpace = THREE.SRGBColorSpace;
+  skyCache.set(key, tex);
   return tex;
 }
 
-/* 按背景风格切换环境贴图（结果缓存，切换不重复计算） */
-function ensureEnvironment(style) {
-  const key = ENV_STYLES[style] ? style : 'studio';
-  let rt = envCache.get(key);
-  if (!rt) {
-    const tex = makeEnvTexture(key);
-    rt = pmrem.fromEquirectangular(tex);
-    tex.dispose();
-    envCache.set(key, rt);
+/* 重新捕捉环境贴图：真实场景 → 立方体贴图 → PMREM 预滤波 */
+function refreshEnvironment() {
+  const sky = skyTexture(bg);
+  const prevBg = scene.background;
+  const hidden = [];
+  for (const e of modelEntries) {
+    if (e.group.visible) { hidden.push(e.group); e.group.visible = false; }
   }
-  if (scene.environment !== rt.texture) scene.environment = rt.texture;
+  /* 光源标记：参与反射并临时提亮 / 固定大小（自检光点清晰、不闪烁） */
+  const markerBackup = markers.map((m, i) => {
+    const backup = {
+      m,
+      wasVisible: m.group.visible,
+      sphereColor: m.sphere.material.color.clone(),
+      lineColor: m.line.material.color.clone(),
+      scale: m.sphere.scale.x,
+    };
+    m.group.visible = lightDefs[i].enabled && i < lightCount;
+    m.sphere.material.color.multiplyScalar(6);
+    m.line.material.color.multiplyScalar(4);
+    m.sphere.scale.setScalar(1);
+    return backup;
+  });
+  const entry = currentEntry();
+  if (entry) {
+    envCam.position.set(
+      entry.group.position.x,
+      entry.group.position.y + entry.mesh.position.y,
+      0,
+    );
+  }
+  let next = null;
+  const shadowAuto = renderer.shadowMap.autoUpdate;
+  try {
+    scene.background = sky;
+    /* 阴影贴图是从“灯”的视角渲的，各面共用上一帧的结果即可，省掉 6 次阴影重渲 */
+    renderer.shadowMap.autoUpdate = false;
+    envCam.update(renderer, scene);
+    next = pmrem.fromCubemap(envRT.texture);
+  } catch (err) {
+    console.warn('实时环境捕捉失败，退回程序化天空', err);
+    try {
+      next = pmrem.fromEquirectangular(sky);
+    } catch {}
+  } finally {
+    renderer.shadowMap.autoUpdate = shadowAuto;
+    scene.background = prevBg;
+    for (const g of hidden) g.visible = true;
+    for (const b of markerBackup) {
+      b.m.group.visible = b.wasVisible;
+      b.m.sphere.material.color.copy(b.sphereColor);
+      b.m.line.material.color.copy(b.lineColor);
+      b.m.sphere.scale.setScalar(b.scale);
+    }
+  }
+  if (!next) return;
+  const old = envPMREM;
+  envPMREM = next;
+  scene.environment = next.texture;
+  if (old) old.dispose();
 }
 
 /* 环境反射强度：模型用完整强度，地面压暗一些，避免地面反射盖过阴影 */
@@ -282,6 +323,7 @@ function layoutModels() {
   }
   const total = Math.max(x - gap, 0);
   for (const e of shown) e.group.position.x -= total / 2;
+  markEnvDirty();
 }
 
 /* 生成模型几何：先按参数建模，再按需“锉边”（硬棱磨成窄斜面）。
@@ -496,6 +538,7 @@ function updateLight(i) {
   }
   light.position.copy(lightPosition(def));
   updateMarker(i);
+  markEnvDirty();
 }
 const updateAllLights = () => lightDefs.forEach((_, i) => updateLight(i));
 
@@ -570,6 +613,7 @@ function refreshMarkers() {
   lightDefs.forEach((d, i) => {
     markers[i].group.visible = showMarkers && d.enabled && i < lightCount;
   });
+  markEnvDirty();
 }
 
 /* --------------------------- 全局光照参数 --------------------------- */
@@ -593,7 +637,7 @@ function updateGlobalLights() {
   const bs = BG_STYLES[bg] ?? BG_STYLES.studio;
   ground.material.color.setHex(bs.floor);
   setGridColors(bs.gridA, bs.gridB);
-  ensureEnvironment(bg);
+  markEnvDirty();
   applyEnvIntensity();
 }
 
@@ -1110,6 +1154,11 @@ function ensureUI() {
     renderLightUI();
     refreshMarkers();
     syncGlobalUI();
+    try {
+      refreshEnvironment(); // 首帧就要有环境反射，避免金属一闪而黑
+    } catch (err) {
+      console.warn('环境贴图初始化失败', err);
+    }
   } catch (err) {
     showFatal('界面初始化异常：' + (err && err.message ? err.message : err));
   }
@@ -1225,6 +1274,7 @@ function wireGlobalUI() {
     showGrid = !showGrid;
     grid.visible = showGrid;
     setChip(e.currentTarget, showGrid);
+    markEnvDirty();
     scheduleSave();
   });
   $('#btn-shot').addEventListener('click', () => {
@@ -1373,7 +1423,7 @@ function loadState(s) {
   hemiOn = !!s.hemiOn;
   hemiI = s.hemiI ?? 0.4;
   exposure = s.exposure ?? 1;
-  envI = clamp(Number(s.envI ?? 0.55) || 0, 0, 3);
+  envI = clamp(Number(s.envI ?? 0.7) || 0, 0, 3);
   bg = s.bg ?? 'studio';
   autorotate = !!s.autorotate;
   showMarkers = s.showMarkers !== false;
@@ -1690,6 +1740,7 @@ function buildViewUI() {
 const clock = new THREE.Clock();
 let fpsFrames = 0;
 let fpsTime = 0;
+let envLast = -1; // 上次环境贴图刷新时刻（秒）
 
 function animate() {
   requestAnimationFrame(animate);
@@ -1700,6 +1751,12 @@ function animate() {
   }
   markers.forEach((m, i) => m.sphere.scale.setScalar(1 + Math.sin(t * 3 + i * 1.7) * 0.18));
   controls.update();
+  /* 环境贴图按需重算（限频，避免拖动参数时每帧都捕捉一遍场景） */
+  if (envDirty && t - envLast >= ENV_INTERVAL) {
+    envDirty = false;
+    envLast = t;
+    refreshEnvironment();
+  }
   renderer.render(scene, camera);
   fpsFrames += 1;
   fpsTime += dt;

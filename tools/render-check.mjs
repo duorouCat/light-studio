@@ -198,6 +198,16 @@ const e2 = await shot('sph-env2', stateOf('sphere', { ...BIG, metalness: 1, roug
 const dEnv = diff(e0, e2);
 check('环境反射生效（画面变化 > 0.3%）', dEnv.pct > 0.3, `变化 ${dEnv.pct}%`);
 
+/* ---------- 6. 金属真实反射光源：光源挪到另一侧，反射里的光点必须跟着挪 ----------
+   光源强度设为 0，只保留“光源标记”（它才是被反射的那个“光源”），
+   这样画面差异只可能来自环境贴图里光源位置的改变 */
+const LIGHT_A = [{ ...DEFAULT_DEFS[0], type: 'point', intensity: 0, azimuth: 0, elevation: 25, distance: 6, shadow: false }];
+const LIGHT_B = [{ ...LIGHT_A[0], azimuth: 180 }];
+const reflA = await shot('sph-refl-a', stateOf('sphere', { ...BIG, metalness: 1, roughness: 0.05, bevel: 0 }, { envI: 2, defs: LIGHT_A }));
+const reflB = await shot('sph-refl-b', stateOf('sphere', { ...BIG, metalness: 1, roughness: 0.05, bevel: 0 }, { envI: 2, defs: LIGHT_B }));
+const dRefl = diff(reflA, reflB);
+check('金属真实反射光源（光源换到另一侧，反射光点跟着移动）', dRefl.changed > 30, `变化像素 ${dRefl.changed}`);
+
 const failed = results.filter((r) => !r).length;
 console.log(failed ? `\n${failed} 项未通过` : '\n全部通过');
 process.exit(failed ? 1 : 0);
