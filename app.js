@@ -1712,14 +1712,17 @@ function buildViewUI() {
     num.step = String(r.step);
     const commit = (raw) => {
       const v = clamp(Number(raw), r.min, r.max);
+      if (!isFinite(v)) return;
       const cur = currentView();
       cur[r.key] = v;
       applyView(cur.az, cur.el, cur.d);
+      /* 输入框聚焦时 applyView 里的回写会被跳过，这里把两个框都归一到实际生效的值 */
+      range.value = String(v);
+      num.value = String(v);
     };
-    /* 拖动滑杆时只实时预览数值，松手(change)才移动相机，避免输入与相机同步互相打架 */
-    range.addEventListener('input', () => {
-      num.value = range.value;
-    });
+    /* 拖动滑杆实时移动相机（syncViewInputs 在输入框获得焦点时会跳过回写，
+       因此不会出现“输入框与相机互相打架”的情况） */
+    range.addEventListener('input', () => commit(range.value));
     range.addEventListener('change', () => commit(range.value));
     num.addEventListener('change', () => commit(num.value));
     num.addEventListener('keydown', (e) => {
@@ -1745,6 +1748,8 @@ function buildViewUI() {
     });
     pw.append(b);
   });
+  /* 用鼠标在场景里转动视角时，右侧三个参数也实时跟随 */
+  controls.addEventListener('change', syncViewInputs);
   syncViewInputs();
 }
 
