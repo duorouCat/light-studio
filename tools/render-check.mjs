@@ -132,6 +132,20 @@ function greenPixels(img, region = VP) {
   return n;
 }
 
+/** 统计明显偏黄的像素数（用于检查镜面是否把金色选中圆环照进了模型） */
+function yellowPixels(img, region = VP) {
+  const { width } = img;
+  let n = 0;
+  for (let y = region.y; y < region.y + region.h; y++) {
+    for (let x = region.x; x < region.x + region.w; x++) {
+      const i = (y * width + x) * 4;
+      const r = img.rgba[i], g = img.rgba[i + 1], b = img.rgba[i + 2];
+      if (r > 80 && r - b > 35 && g > b + 10) n++;
+    }
+  }
+  return n;
+}
+
 /** 顶部错误条检测：#err-bar 背景 rgba(180,40,40,.95) */
 function errorBar(img) {
   let red = 0;
@@ -207,6 +221,15 @@ const reflA = await shot('sph-refl-a', stateOf('sphere', { ...BIG, metalness: 1,
 const reflB = await shot('sph-refl-b', stateOf('sphere', { ...BIG, metalness: 1, roughness: 0.05, bevel: 0 }, { envI: 2, defs: LIGHT_B }));
 const dRefl = diff(reflA, reflB);
 check('金属真实反射光源（光源换到另一侧，反射光点跟着移动）', dRefl.changed > 30, `变化像素 ${dRefl.changed}`);
+
+/* ---------- 7. 镜面金属不得把界面标注照进去 ----------
+   选中圆环是界面指示（金色），若被镜面金属反射，会在模型面上出现一条
+   横贯的黄色带（视角越俯视越明显）。这里用镜面球体 + 灰色模型：
+   视口上半部分出现的黄色只可能来自被反射的圆环 */
+const mirror = await shot('mirror-sphere', stateOf('sphere', { metalness: 1, roughness: 0, bevel: 0, color: '#c8ccd4', ...BIG }, { envI: 1.5 }));
+const upper = { x: VP.x, y: VP.y, w: VP.w, h: 436 }; // 不含地面圆环所在的下方区域
+const yellowUpper = yellowPixels(mirror, upper);
+check('镜面金属不反射界面标注（选中圆环）', yellowUpper < 50, `上半视口黄色像素 ${yellowUpper}`);
 
 const failed = results.filter((r) => !r).length;
 console.log(failed ? `\n${failed} 项未通过` : '\n全部通过');

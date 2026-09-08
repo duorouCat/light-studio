@@ -177,6 +177,10 @@ function refreshEnvironment() {
   for (const e of modelEntries) {
     if (e.group.visible) { hidden.push(e.group); e.group.visible = false; }
   }
+  /* 选中圆环是界面标注（不是场景里的东西），镜面金属要是把它照进去，
+     就会出现一条横贯模型的黄带 —— 捕捉期间隐藏它 */
+  const ringWasVisible = selRing.visible;
+  selRing.visible = false;
   /* 光源标记：只让“光球”参与反射（连线/箭头/锥形线框是标注，不该被照进金属里），
      并临时提亮、固定大小，让镜面里出现干净清晰的光源光点 */
   const markerBackup = markers.map((m, i) => {
@@ -221,6 +225,7 @@ function refreshEnvironment() {
   } finally {
     renderer.shadowMap.autoUpdate = shadowAuto;
     scene.background = prevBg;
+    selRing.visible = ringWasVisible;
     for (const g of hidden) g.visible = true;
     for (const b of markerBackup) {
       b.m.group.visible = b.wasVisible;
