@@ -4,6 +4,7 @@
  * ===================================================================== */
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/OrbitControls.js';
+import { bevelGeometry } from './bevel.js';
 
 /* ------------------------------ 工具 ------------------------------ */
 const $ = (sel) => document.querySelector(sel);
@@ -110,6 +111,91 @@ const BG_STYLES = {
   night:  { floor: 0x101724, gridA: 0x6a7488, gridB: 0x2c3345 },
 };
 
+/* --------------------- 环境反射贴图（IBL） --------------------- */
+/* 没有环境贴图时，金属度与粗糙度的视觉差异非常小：金属只反射环境，
+   纯点光源下金属会发黑；粗糙度也只是改变高光大小。这里用程序化生成的
+   等距柱状贴图（渐变天空 + 柔光箱亮斑）作为环境光照/反射来源，
+   于是「金属度」决定反射的镜面感与染色，「粗糙度」决定反射的锐利/模糊，
+   两个滑杆的差别一眼可见。 */
+let envI = 0.55; // 环境反射强度（全局可调）
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+pmrem.compileEquirectangularShader();
+const envCache = new Map();
+
+const ENV_STYLES = {
+  studio: {
+    top: '#5a6478', horizon: '#2b3242', ground: '#141821', floor: '#0a0d13',
+    boxes: [
+      { x: 0.25, y: 0.16, r: 0.20, color: '255,250,240', a: 0.95 },
+      { x: 0.72, y: 0.24, r: 0.12, color: '220,235,255', a: 0.75 },
+    ],
+  },
+  day: {
+    top: '#cfe3ff', horizon: '#eaf2ff', ground: '#7f8ea6', floor: '#4a5668',
+    boxes: [{ x: 0.5, y: 0.07, r: 0.30, color: '255,255,255', a: 1 }],
+  },
+  dusk: {
+    top: '#2f3f6b', horizon: '#c9773f', ground: '#3a2a24', floor: '#151013',
+    boxes: [{ x: 0.5, y: 0.42, r: 0.26, color: '255,190,120', a: 0.95 }],
+  },
+  night: {
+    top: '#0d1526', horizon: '#1b2740', ground: '#080b12', floor: '#04060a',
+    boxes: [
+      { x: 0.2, y: 0.12, r: 0.14, color: '200,225,255', a: 0.8 },
+      { x: 0.75, y: 0.18, r: 0.10, color: '255,235,200', a: 0.6 },
+    ],
+  },
+};
+
+/* 画一张等距柱状贴图：竖向渐变天空 + 两团柔光箱亮斑 */
+function makeEnvTexture(style) {
+  const W = 512, H = 256;
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const ctx = cv.getContext('2d');
+  const s = ENV_STYLES[style] ?? ENV_STYLES.studio;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, s.top);
+  g.addColorStop(0.49, s.horizon);
+  g.addColorStop(0.52, s.ground);
+  g.addColorStop(1, s.floor);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  for (const b of s.boxes) {
+    const rg = ctx.createRadialGradient(b.x * W, b.y * H, 0, b.x * W, b.y * H, b.r * W);
+    rg.addColorStop(0, `rgba(${b.color},${b.a})`);
+    rg.addColorStop(0.55, `rgba(${b.color},${b.a * 0.35})`);
+    rg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, 0, W, H);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/* 按背景风格切换环境贴图（结果缓存，切换不重复计算） */
+function ensureEnvironment(style) {
+  const key = ENV_STYLES[style] ? style : 'studio';
+  let rt = envCache.get(key);
+  if (!rt) {
+    const tex = makeEnvTexture(key);
+    rt = pmrem.fromEquirectangular(tex);
+    tex.dispose();
+    envCache.set(key, rt);
+  }
+  if (scene.environment !== rt.texture) scene.environment = rt.texture;
+}
+
+/* 环境反射强度：模型用完整强度，地面压暗一些，避免地面反射盖过阴影 */
+function applyEnvIntensity() {
+  for (const e of modelEntries) e.mesh.material.envMapIntensity = envI;
+  groundMaterial.envMapIntensity = envI * 0.3;
+}
+
 /* ------------------------------ 模型 ------------------------------ */
 const MODEL_DEFS = [
   { id: 'box',    name: '立方体',   baseY: 0.70, ring: 1.20, kind: 'none',   flat: false, color: '#e6b56a', build: (s) => new THREE.BoxGeometry(1.4, 1.4, 1.4) },
@@ -134,6 +220,7 @@ const defaultModelState = (def) => {
     seg: 32,
     detail: 0,
     topRatio: 1,
+    bevel: 0.03,
     wire: false,
     edges: false,
     spin: 0,
@@ -197,10 +284,29 @@ function layoutModels() {
   for (const e of shown) e.group.position.x -= total / 2;
 }
 
+/* 生成模型几何：先按参数建模，再按需“锉边”（硬棱磨成窄斜面）。
+   锉边失败（例如没有硬棱、几何退化）时静默回退到原始几何，不影响使用。 */
+function buildGeometryFor(def, st) {
+  const base = def.build(st);
+  const w = Number(st.bevel);
+  if (!(w > 0)) return base;
+  let bev = null;
+  try {
+    bev = bevelGeometry(base, w);
+  } catch (err) {
+    console.warn('锉边计算失败，改用原始几何', err);
+  }
+  if (bev) {
+    base.dispose();
+    return bev;
+  }
+  return base;
+}
+
 const modelEntries = MODEL_DEFS.map((def) => {
   const st = modelState[def.id];
   const group = new THREE.Group();
-  const mesh = new THREE.Mesh(def.build(st), new THREE.MeshStandardMaterial({ flatShading: def.flat }));
+  const mesh = new THREE.Mesh(buildGeometryFor(def, st), new THREE.MeshStandardMaterial({ flatShading: def.flat }));
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   /* 边线叠加层：挂在 mesh 下自动继承缩放/旋转/贴地，微放大避免与面重叠闪烁 */
@@ -228,6 +334,7 @@ function applyModel(entry) {
   mat.color.set(st.color);
   mat.metalness = st.metalness;
   mat.roughness = st.roughness;
+  mat.envMapIntensity = envI;
   mat.wireframe = st.wire;
   entry.edges.visible = st.edges;
   entry.edges.material.color.set(new THREE.Color(st.color).multiplyScalar(0.3));
@@ -285,7 +392,7 @@ function roundRectPath(ctx, x, y, w, h, r) {
 
 function rebuildModel(entry) {
   entry.mesh.geometry.dispose();
-  entry.mesh.geometry = entry.def.build(entry.state);
+  entry.mesh.geometry = buildGeometryFor(entry.def, entry.state);
   entry.edges.geometry.dispose();
   entry.edges.geometry = new THREE.EdgesGeometry(entry.mesh.geometry);
   applyModel(entry);
@@ -486,12 +593,14 @@ function updateGlobalLights() {
   const bs = BG_STYLES[bg] ?? BG_STYLES.studio;
   ground.material.color.setHex(bs.floor);
   setGridColors(bs.gridA, bs.gridB);
+  ensureEnvironment(bg);
+  applyEnvIntensity();
 }
 
 /* ------------------------------ 预设 ------------------------------ */
 const PRESETS = [
   {
-    name: '影棚标准', count: 1, bg: 'studio', exposure: 1.0,
+    name: '影棚标准', count: 1, bg: 'studio', exposure: 1.0, env: 0.6,
     ambient: { i: 0.5, k: 6500 }, hemi: { on: false, i: 0.4 },
     defs: [
       { type: 'directional', kelvin: 6500, intensity: 2.5, azimuth: 0, elevation: 45, distance: 7, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
@@ -499,7 +608,7 @@ const PRESETS = [
     ],
   },
   {
-    name: '正午日光', count: 2, bg: 'day', exposure: 1.15,
+    name: '正午日光', count: 2, bg: 'day', exposure: 1.15, env: 0.85,
     ambient: { i: 0.35, k: 7000 }, hemi: { on: true, i: 0.45 },
     defs: [
       { type: 'directional', kelvin: 5800, intensity: 4, azimuth: -15, elevation: 68, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
@@ -507,7 +616,7 @@ const PRESETS = [
     ],
   },
   {
-    name: '日出黄昏', count: 2, bg: 'dusk', exposure: 1.05,
+    name: '日出黄昏', count: 2, bg: 'dusk', exposure: 1.05, env: 0.45,
     ambient: { i: 0.15, k: 2200 }, hemi: { on: false, i: 0.2 },
     defs: [
       { type: 'directional', kelvin: 2400, intensity: 2, azimuth: -55, elevation: 10, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
@@ -515,7 +624,7 @@ const PRESETS = [
     ],
   },
   {
-    name: '清冷月光', count: 2, bg: 'night', exposure: 0.9,
+    name: '清冷月光', count: 2, bg: 'night', exposure: 0.9, env: 0.35,
     ambient: { i: 0.1, k: 9000 }, hemi: { on: false, i: 0.15 },
     defs: [
       { type: 'directional', kelvin: 9500, intensity: 1, azimuth: -40, elevation: 42, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
@@ -523,7 +632,7 @@ const PRESETS = [
     ],
   },
   {
-    name: '舞台霓虹', count: 4, bg: 'night', exposure: 1.0,
+    name: '舞台霓虹', count: 4, bg: 'night', exposure: 1.0, env: 0.4,
     ambient: { i: 0.05, k: 4000 }, hemi: { on: false, i: 0.1 },
     defs: [
       { type: 'point', kelvin: 4000, intensity: 6, azimuth: -75, elevation: 15, distance: 6, custom: true, customColor: '#ff2d78', shadow: false, enabled: true, angle: 30, penumbra: 0.5 },
@@ -533,7 +642,7 @@ const PRESETS = [
     ],
   },
   {
-    name: '影棚柔光', count: 4, bg: 'studio', exposure: 1.1,
+    name: '影棚柔光', count: 4, bg: 'studio', exposure: 1.1, env: 0.7,
     ambient: { i: 0.42, k: 6000 }, hemi: { on: true, i: 0.3 },
     defs: [
       { type: 'directional', kelvin: 5500, intensity: 1.6, azimuth: 0, elevation: 38, distance: 8, custom: false, customColor: '#ffffff', shadow: true, enabled: true, angle: 30, penumbra: 0.5 },
@@ -557,6 +666,7 @@ function applyPreset(idx) {
   hemiI = p.hemi.i;
   exposure = p.exposure;
   bg = p.bg;
+  envI = p.env ?? envI;
   $('#preset-select').value = String(idx);
   syncGlobalUI();
   updateGlobalLights();
@@ -714,6 +824,25 @@ function buildModelParams() {
     n.textContent = '该模型为规则立方体，可通过「缩放 X / Y / Z」调整长宽高比例。';
     wrap.append(n);
   }
+  /* 锉边：把硬棱磨成很窄的斜面（拖动时按帧合并重建，避免卡顿） */
+  let bevelRaf = 0;
+  const rebuildSoon = (entry) => {
+    if (bevelRaf) return;
+    bevelRaf = requestAnimationFrame(() => {
+      bevelRaf = 0;
+      rebuildModel(entry);
+    });
+  };
+  slider('锉边宽度', 0, 0.2, 0.002, st.bevel, (v) => {
+    st.bevel = v;
+    rebuildSoon(currentEntry());
+    scheduleSave();
+  });
+  const nBevel = document.createElement('div');
+  nBevel.className = 'note';
+  nBevel.textContent = '锉边：把硬棱（相邻面夹角 ≥ 25°）磨成一条很窄的斜面，像用锉刀锉过一样，棱上的高光与明暗过渡会变得清晰可见；0 为关闭。平滑面（球面、圆柱侧面等）不受影响。';
+  wrap.append(nBevel);
+
   slider('绕X轴旋转(°)', 0, 360, 1, st.rx, (v) => { st.rx = v; applyModel(currentEntry()); scheduleSave(); });
   slider('绕Y轴旋转(°)', 0, 360, 1, st.ry, (v) => { st.ry = v; applyModel(currentEntry()); scheduleSave(); });
   slider('绕Z轴旋转(°)', 0, 360, 1, st.rz, (v) => { st.rz = v; applyModel(currentEntry()); scheduleSave(); });
@@ -917,6 +1046,11 @@ function syncGlobalUI() {
   setNum('#hemi-intensity-num', hemiI);
   $('#exposure').value = exposure;
   setNum('#exposure-num', exposure);
+  const envEl = $('#env-intensity');
+  if (envEl) {
+    envEl.value = envI;
+    setNum('#env-intensity-num', envI);
+  }
   $('#bg-select').value = bg;
   viewport.classList.remove('bg-studio', 'bg-day', 'bg-dusk', 'bg-night');
   viewport.classList.add('bg-' + bg);
@@ -1030,6 +1164,13 @@ function wireGlobalUI() {
     renderer.toneMappingExposure = exposure;
     scheduleSave();
   });
+  if ($('#env-intensity')) {
+    wireRow('#env-intensity', '#env-intensity-num', (v) => {
+      envI = v;
+      applyEnvIntensity();
+      scheduleSave();
+    });
+  }
   $('#bg-select').addEventListener('change', (e) => {
     bg = e.target.value;
     updateGlobalLights();
@@ -1193,6 +1334,7 @@ function serializeState() {
     hemiOn,
     hemiI,
     exposure,
+    envI,
     bg,
     selectedId,
     shownIds: [...shownIds],
@@ -1231,6 +1373,7 @@ function loadState(s) {
   hemiOn = !!s.hemiOn;
   hemiI = s.hemiI ?? 0.4;
   exposure = s.exposure ?? 1;
+  envI = clamp(Number(s.envI ?? 0.55) || 0, 0, 3);
   bg = s.bg ?? 'studio';
   autorotate = !!s.autorotate;
   showMarkers = s.showMarkers !== false;
@@ -1246,6 +1389,7 @@ function loadState(s) {
         ms.rz = normDeg(Number(ms.rz) || 0);
         ms.seg = clamp(Math.round(Number(ms.seg) || 32), 8, 64);
         ms.detail = clamp(Math.round(Number(ms.detail) || 0), 0, 3);
+        ms.bevel = clamp(Number(ms.bevel) || 0, 0, 0.2);
         modelState[id] = ms;
       }
     });

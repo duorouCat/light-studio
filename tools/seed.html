@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>预置配置并进入光影实验室</title>
+<!-- =====================================================================
+     开发用：把 URL 上携带的配置写进 localStorage，然后跳转到主页面。
+     无头 Chrome 无法交互，靠它给不同参数各截一张图做数值对比。
+        tools/seed.html?s=<base64(JSON 配置)>
+     配置对象即 app.js 里 serializeState() 的结构（写入 DEFAULT_KEY）。
+     ===================================================================== -->
+</head>
+<body>
+<script>
+let diag = '';
+try {
+  const params = new URLSearchParams(location.search);
+  const s = params.get('s');
+  if (s) {
+    const json = decodeURIComponent(escape(atob(s)));
+    localStorage.setItem('light-studio-default-v5', json);
+    localStorage.removeItem('light-studio-v5');
+  }
+  if (params.get('diag') === '1') diag = '?diag=1';
+} catch (err) {
+  document.title = 'seed 失败：' + err.message;
+}
+location.replace('../index.html' + diag);
+</script>
+</body>
+</html>
